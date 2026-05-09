@@ -1,0 +1,150 @@
+name: 'SAST Chat — SAST Suite'
+description: >-
+  Run the language-appropriate SAST tools and emit SARIF/JSON artifacts
+  with the names chat-system's processor expects. Picks the toolset
+  based on the `language` input so an inheritor repo only declares the
+  language and gets the right scans.
+author: 'cocheche'
+branding:
+  icon: 'shield'
+  color: 'orange'
+
+inputs:
+  language:
+    description: 'Source language (java|python|node|go). Selects which tools run.'
+    required: true
+  semgrep-config:
+    description: 'Semgrep ruleset (auto|p/owasp-top-ten|...).'
+    required: false
+    default: 'auto'
+  upload-individual-artifacts:
+    description: 'Upload one artifact per tool (true) or just merge then return paths (false).'
+    required: false
+    default: 'true'
+
+outputs:
+  reports-dir:
+    description: 'Directory containing all SARIF/JSON outputs. Pass to aggregate-sarif.'
+    value: ${{ steps.collect.outputs.dir }}
+
+runs:
+  using: 'composite'
+  steps:
+    # ----- Universal: Semgrep (all languages) ---------------------------
+    - name: Semgrep
+      shell: bash
+      run: |
+        mkdir -p reports
+        docker run --rm -v "${PWD}:/src" --workdir /src semgrep/semgrep \
+          semgrep scan --config="${{ inputs.semgrep-config }}" \
+          --sarif --output=reports/semgrep.sarif || true
+
+    # ----- Universal: Trivy filesystem scan -----------------------------
+    - name: Trivy FS
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'reports/trivy-fs.sarif'
+        severity: 'CRITICAL,HIGH,MEDIUM'
+        exit-code: '0'
+
+    # ----- Java: SpotBugs + Dep-Check -----------------------------------
+    - name: Setup JDK 17
+      if: ${{ inputs.language == 'java' }}
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: 'gradle'
+
+    - name: SpotBugs (Java)
+      if: ${{ inputs.language == 'java' }}
+      shell: bash
+      run: |
+        ./gradlew compileJava spotbugsMain --no-daemon -x test || true
+        cp build/reports/spotbugs/main.sarif reports/spotbugs.sarif 2>/dev/null || true
+
+    - name: Dep-Check (Java)
+      if: ${{ inputs.language == 'java' }}
+      shell: bash
+      env:
+        NVD_API_KEY: ${{ env.NVD_API_KEY }}
+      run: |
+        ./gradlew dependencyCheckAnalyze --no-daemon \
+          -Dnvd.api.key="${NVD_API_KEY:-}" \
+          -Dnvd.api.validForHours=720 \
+          -Dformats=JSON,HTML \
+          -DossindexAnalyzerEnabled=false \
+          -DnodeAuditAnalyzerEnabled=false || true
+        cp build/reports/dependency-check-report.json reports/depcheck.json 2>/dev/null || true
+
+    # ----- Python: Bandit + Safety --------------------------------------
+    - name: Setup Python 3.12
+      if: ${{ inputs.language == 'python' }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Bandit (Python)
+      if: ${{ inputs.language == 'python' }}
+      shell: bash
+      run: |
+        pip install bandit[toml] bandit-sarif-formatter
+        bandit -r . -f sarif -o reports/bandit.sarif || true
+
+    - name: Safety (Python)
+      if: ${{ inputs.language == 'python' }}
+      shell: bash
+      run: |
+        pip install safety
+        safety check --json --output reports/safety.json || true
+
+    # ----- Node: ESLint security + npm audit ----------------------------
+    - name: Setup Node 20
+      if: ${{ inputs.language == 'node' }}
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: ESLint security (Node)
+      if: ${{ inputs.language == 'node' }}
+      shell: bash
+      run: |
+        npm install --save-dev eslint eslint-plugin-security @microsoft/eslint-formatter-sarif || true
+        cat > .eslintrc.json <<EOF
+        {"plugins":["security"],"extends":["plugin:security/recommended"],"env":{"browser":true,"es2021":true}}
+        EOF
+        npx eslint . --ext .js,.ts,.jsx,.tsx \
+          --format @microsoft/eslint-formatter-sarif \
+          --output-file reports/eslint.sarif || true
+
+    - name: npm audit (Node)
+      if: ${{ inputs.language == 'node' }}
+      shell: bash
+      run: |
+        npm audit --json > reports/npm-audit.json || true
+
+    # ----- Go: gosec ----------------------------------------------------
+    - name: gosec (Go)
+      if: ${{ inputs.language == 'go' }}
+      uses: securego/gosec@master
+      with:
+        args: '-fmt=sarif -out=reports/gosec.sarif ./...'
+
+    # ----- Collect ------------------------------------------------------
+    - name: Collect outputs
+      id: collect
+      shell: bash
+      run: |
+        ls -la reports/ || true
+        echo "dir=reports" >> "$GITHUB_OUTPUT"
+
+    - name: Upload individual artifacts
+      if: ${{ inputs.upload-individual-artifacts == 'true' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: sast-reports-${{ github.run_number }}
+        path: reports/
+        retention-days: 30

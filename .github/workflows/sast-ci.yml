@@ -1,0 +1,85 @@
+name: SAST CI (reusable)
+
+# Reusable workflow — inheritor repos call this with one block:
+#
+#   jobs:
+#     security:
+#       uses: cochecheee/sast-action/.github/workflows/sast-ci.yml@v0.2.0
+#       with:
+#         language: python    # java | python | node | go
+#         dashboard_url: ${{ secrets.MCP_GATEWAY_URL }}
+#         dashboard_token: ${{ secrets.MCP_WEBHOOK_TOKEN }}
+#
+# Behavior:
+#   1. Run language-appropriate SAST tools via actions/sast-suite
+#   2. Upload outputs as a workflow artifact (chat-system poller picks up)
+#   3. Notify the dashboard with run metadata via actions/notify-dashboard
+#
+# Tools per language:
+#   java:   semgrep, trivy-fs, spotbugs, dep-check
+#   python: semgrep, trivy-fs, bandit, safety
+#   node:   semgrep, trivy-fs, eslint-security, npm-audit
+#   go:     semgrep, trivy-fs, gosec
+
+on:
+  workflow_call:
+    inputs:
+      language:
+        description: 'Source language (java|python|node|go)'
+        required: true
+        type: string
+      dashboard_url:
+        description: 'chat-system MCP Gateway URL'
+        required: false
+        type: string
+        default: ''
+      semgrep_config:
+        description: 'Semgrep ruleset'
+        required: false
+        type: string
+        default: 'auto'
+      pipeline_status:
+        description: 'Override pipeline_status sent to dashboard'
+        required: false
+        type: string
+        default: 'passed'
+    secrets:
+      dashboard_token:
+        description: 'Bearer token matching CI_WEBHOOK_TOKEN'
+        required: false
+      nvd_api_key:
+        description: 'NVD API key for Dep-Check (Java only). Optional but recommended.'
+        required: false
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  sast:
+    name: SAST (${{ inputs.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NVD_API_KEY: ${{ secrets.nvd_api_key }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run SAST suite
+        uses: cochecheee/sast-action/actions/sast-suite@main
+        with:
+          language: ${{ inputs.language }}
+          semgrep-config: ${{ inputs.semgrep_config }}
+          upload-individual-artifacts: 'true'
+
+      - name: Notify chat-system dashboard
+        if: ${{ inputs.dashboard_url != '' }}
+        uses: cochecheee/sast-action/actions/notify-dashboard@main
+        with:
+          dashboard-url: ${{ inputs.dashboard_url }}
+          dashboard-token: ${{ secrets.dashboard_token }}
+          pipeline-status: ${{ inputs.pipeline_status }}
+          fail-on-error: 'false'
