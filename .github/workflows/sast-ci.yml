@@ -7,7 +7,8 @@ name: SAST CI (reusable)
 #       uses: cochecheee/sast-action/.github/workflows/sast-ci.yml@v0.2.0
 #       with:
 #         language: python    # java | python | node | go
-#         dashboard_url: ${{ secrets.MCP_GATEWAY_URL }}
+#       secrets:
+#         dashboard_url:   ${{ secrets.MCP_GATEWAY_URL }}
 #         dashboard_token: ${{ secrets.MCP_WEBHOOK_TOKEN }}
 #
 # Behavior:
@@ -28,11 +29,6 @@ on:
         description: 'Source language (java|python|node|go)'
         required: true
         type: string
-      dashboard_url:
-        description: 'chat-system MCP Gateway URL'
-        required: false
-        type: string
-        default: ''
       semgrep_config:
         description: 'Semgrep ruleset'
         required: false
@@ -44,6 +40,9 @@ on:
         type: string
         default: 'passed'
     secrets:
+      dashboard_url:
+        description: 'chat-system MCP Gateway URL (passed as secret because GitHub disallows ${{ secrets.* }} in `with:` of reusable-workflow callers).'
+        required: false
       dashboard_token:
         description: 'Bearer token matching CI_WEBHOOK_TOKEN'
         required: false
@@ -76,10 +75,10 @@ jobs:
           upload-individual-artifacts: 'true'
 
       - name: Notify chat-system dashboard
-        if: ${{ inputs.dashboard_url != '' }}
+        if: ${{ secrets.dashboard_url != '' }}
         uses: cochecheee/sast-action/actions/notify-dashboard@main
         with:
-          dashboard-url: ${{ inputs.dashboard_url }}
+          dashboard-url: ${{ secrets.dashboard_url }}
           dashboard-token: ${{ secrets.dashboard_token }}
           pipeline-status: ${{ inputs.pipeline_status }}
           fail-on-error: 'false'
