@@ -41,7 +41,7 @@ on:
         default: 'passed'
     secrets:
       dashboard_url:
-        description: 'chat-system MCP Gateway URL (passed as secret because GitHub disallows ${{ secrets.* }} in `with:` of reusable-workflow callers).'
+        description: 'chat-system MCP Gateway URL. Declared as a secret because GitHub disallows secret references in caller with-blocks.'
         required: false
       dashboard_token:
         description: 'Bearer token matching CI_WEBHOOK_TOKEN'
@@ -61,24 +61,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      NVD_API_KEY: ${{ secrets.nvd_api_key }}
+      # GitHub forbids `secrets.*` in step-level `if:` and bare `${{ secrets.* }}`
+      # in some contexts, so we bind once at job level then reference env.* below.
+      NVD_API_KEY:     ${{ secrets.nvd_api_key }}
+      DASHBOARD_URL:   ${{ secrets.dashboard_url }}
+      DASHBOARD_TOKEN: ${{ secrets.dashboard_token }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Run SAST suite
-        uses: cochecheee/sast-action/actions/sast-suite@main
+        uses: cochecheee/sast-action/actions/sast-suite@master
         with:
           language: ${{ inputs.language }}
           semgrep-config: ${{ inputs.semgrep_config }}
           upload-individual-artifacts: 'true'
 
       - name: Notify chat-system dashboard
-        if: ${{ secrets.dashboard_url != '' }}
-        uses: cochecheee/sast-action/actions/notify-dashboard@main
+        if: env.DASHBOARD_URL != ''
+        uses: cochecheee/sast-action/actions/notify-dashboard@master
         with:
-          dashboard-url: ${{ secrets.dashboard_url }}
-          dashboard-token: ${{ secrets.dashboard_token }}
+          dashboard-url:   ${{ env.DASHBOARD_URL }}
+          dashboard-token: ${{ env.DASHBOARD_TOKEN }}
           pipeline-status: ${{ inputs.pipeline_status }}
           fail-on-error: 'false'

@@ -91,15 +91,27 @@ runs:
       if: ${{ inputs.language == 'python' }}
       shell: bash
       run: |
-        pip install bandit[toml] bandit-sarif-formatter
-        bandit -r . -f sarif -o reports/bandit.sarif || true
+        pip install 'bandit[toml]' bandit-sarif-formatter
+        bandit -r . -x './.git,./.github,./reports,./venv,./.venv' \
+          -f sarif -o reports/bandit.sarif || true
 
     - name: Safety (Python)
       if: ${{ inputs.language == 'python' }}
       shell: bash
       run: |
-        pip install safety
-        safety check --json --output reports/safety.json || true
+        # Pin safety<3 because 3.x replaced `check` with `scan` and changed
+        # output flags. Stay on 2.x until we adopt the new CLI everywhere.
+        pip install 'safety<3'
+        REQ_FILE=""
+        for f in requirements.txt requirements/base.txt requirements/main.txt; do
+          [ -f "$f" ] && REQ_FILE="$f" && break
+        done
+        if [ -n "$REQ_FILE" ]; then
+          safety check -r "$REQ_FILE" --json --output reports/safety.json || true
+        else
+          # Fall back to scanning whatever pip has installed in the runner.
+          safety check --json --output reports/safety.json || true
+        fi
 
     # ----- Node: ESLint security + npm audit ----------------------------
     - name: Setup Node 20
