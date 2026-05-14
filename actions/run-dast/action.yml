@@ -1,0 +1,100 @@
+name: 'SAST Chat — Run DAST (OWASP ZAP Baseline)'
+description: >-
+  Run OWASP ZAP baseline scan against a live URL (staging from V2.2 CD).
+  Baseline = passive only, ~5 minutes, safe for staging traffic. Emits
+  zap.json + zap.sarif under reports/ so the chat-system processor can
+  ingest them with category=dast.
+author: 'cocheche'
+branding:
+  icon: 'eye'
+  color: 'orange'
+
+inputs:
+  target_url:
+    description: 'Public URL to scan. Required. e.g. https://sample-python-latest.onrender.com'
+    required: true
+  fail_on_warn:
+    description: 'Set "true" to fail the job on ZAP warnings. Default "false" — warnings reported but pipeline continues.'
+    required: false
+    default: 'false'
+  scan_type:
+    description: 'baseline (passive, ~5min) | full (active, ~30min). Default baseline.'
+    required: false
+    default: 'baseline'
+  zap_rules:
+    description: 'Path to ZAP rules file (optional).'
+    required: false
+    default: ''
+
+outputs:
+  report_path:
+    description: 'Path to zap.sarif inside reports/'
+    value: ${{ steps.collect.outputs.path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Prepare reports dir
+      shell: bash
+      run: mkdir -p reports
+
+    - name: Wait for target to be reachable
+      shell: bash
+      env:
+        URL: ${{ inputs.target_url }}
+      run: |
+        echo "Waiting for ${URL} to respond 2xx/3xx (cold start tolerance)…"
+        for i in $(seq 1 12); do
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "${URL}" || echo 000)
+          if [[ "${STATUS}" =~ ^[23] ]]; then
+            echo "Target alive (HTTP ${STATUS}) after $((i*10))s"
+            exit 0
+          fi
+          echo "  attempt $i: HTTP ${STATUS} — retry in 10s"
+          sleep 10
+        done
+        echo "::warning::Target never returned 2xx/3xx after 2 minutes; scan will run anyway"
+
+    - name: ZAP Baseline scan
+      if: ${{ inputs.scan_type == 'baseline' }}
+      uses: zaproxy/action-baseline@v0.13.0
+      with:
+        target: ${{ inputs.target_url }}
+        rules_file_name: ${{ inputs.zap_rules }}
+        # Allow report generation even when alerts found
+        allow_issue_writing: false
+        # cmd_options: '-a' = include alpha rules (more findings, demo-friendly)
+        cmd_options: '-a -J zap.json -w zap.md'
+        fail_action: ${{ inputs.fail_on_warn }}
+      continue-on-error: true
+
+    - name: ZAP Full scan
+      if: ${{ inputs.scan_type == 'full' }}
+      uses: zaproxy/action-full-scan@v0.12.0
+      with:
+        target: ${{ inputs.target_url }}
+        rules_file_name: ${{ inputs.zap_rules }}
+        allow_issue_writing: false
+        cmd_options: '-a -J zap.json -w zap.md'
+        fail_action: ${{ inputs.fail_on_warn }}
+      continue-on-error: true
+
+    - name: Collect ZAP outputs
+      id: collect
+      shell: bash
+      run: |
+        # ZAP action drops reports at repo root — relocate so the
+        # sast-suite-style 'reports/' bundle layout stays consistent.
+        for f in zap.json zap.md report_json.json report_md.md report_html.html; do
+          [ -f "$f" ] && mv "$f" reports/ 2>/dev/null || true
+        done
+        ls -la reports/ || true
+        echo "path=reports/zap.json" >> "$GITHUB_OUTPUT"
+
+    - name: Upload DAST artifact
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: dast-reports-${{ github.run_number }}
+        path: reports/
+        retention-days: 30

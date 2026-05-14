@@ -60,6 +60,22 @@ on:
         required: false
         type: string
         default: '.'
+      # ---- DAST inputs (V2.3) ----
+      dast:
+        description: 'Run OWASP ZAP baseline scan against the staging URL after CD. Requires staging_url input.'
+        required: false
+        type: boolean
+        default: false
+      staging_url:
+        description: 'Public URL ZAP scans. Required when dast=true. e.g. https://sample-python-latest.onrender.com'
+        required: false
+        type: string
+        default: ''
+      dast_scan_type:
+        description: 'baseline (passive, ~5min) | full (active, ~30min)'
+        required: false
+        type: string
+        default: 'baseline'
     secrets:
       dashboard_url:
         description: 'chat-system MCP Gateway URL. Declared as a secret because GitHub disallows secret references in caller with-blocks.'
@@ -163,3 +179,43 @@ jobs:
         shell: bash
         run: |
           echo "::notice::CD complete. Image: ${{ steps.build.outputs.image_tag }}"
+
+  # ============================================================
+  # DAST — Runtime security scan (V2.3)
+  # Runs ZAP baseline against the deployed staging URL. Independent
+  # job so it can wait for Render redeploy without blocking SAST/CD.
+  # ============================================================
+  dast:
+    name: DAST (ZAP ${{ inputs.dast_scan_type }})
+    needs: cd
+    if: ${{ inputs.dast && inputs.staging_url != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write       # ZAP action wants this even when allow_issue_writing=false
+    env:
+      DASHBOARD_URL:   ${{ secrets.dashboard_url }}
+      DASHBOARD_TOKEN: ${{ secrets.dashboard_token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Wait 60s for Render to roll new container
+        shell: bash
+        run: sleep 60
+
+      - name: Run OWASP ZAP
+        uses: cochecheee/sast-action/actions/run-dast@master
+        with:
+          target_url: ${{ inputs.staging_url }}
+          scan_type:  ${{ inputs.dast_scan_type }}
+          fail_on_warn: 'false'
+
+      - name: Notify chat-system (DAST done)
+        if: env.DASHBOARD_URL != ''
+        uses: cochecheee/sast-action/actions/notify-dashboard@master
+        with:
+          dashboard-url:   ${{ env.DASHBOARD_URL }}
+          dashboard-token: ${{ env.DASHBOARD_TOKEN }}
+          pipeline-status: dast_complete
+          fail-on-error: 'false'
