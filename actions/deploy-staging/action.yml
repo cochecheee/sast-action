@@ -1,0 +1,77 @@
+name: 'SAST Chat — Deploy Staging'
+description: >-
+  Trigger a Render staging redeploy by hitting the service's Deploy Hook
+  URL. The hook is unique per Render service and lives in
+  Settings → Deploy Hook. Designed to run after build-image pushes the
+  fresh container so Render pulls the new tag.
+author: 'cocheche'
+branding:
+  icon: 'cloud'
+  color: 'orange'
+
+inputs:
+  render_deploy_hook:
+    description: 'Full deploy hook URL from Render (Settings → Deploy Hook). Secret.'
+    required: true
+  service_name:
+    description: 'Human-readable service name for log lines.'
+    required: false
+    default: 'staging'
+  wait_seconds:
+    description: 'Seconds to wait after triggering before declaring success. 0 = fire-and-forget.'
+    required: false
+    default: '0'
+
+outputs:
+  deploy_id:
+    description: 'Render deploy ID returned by the hook (when available).'
+    value: ${{ steps.trigger.outputs.deploy_id }}
+  status_code:
+    description: 'HTTP status code returned by the deploy hook.'
+    value: ${{ steps.trigger.outputs.status_code }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Trigger Render deploy
+      id: trigger
+      shell: bash
+      env:
+        HOOK_URL: ${{ inputs.render_deploy_hook }}
+        SERVICE:  ${{ inputs.service_name }}
+        WAIT:     ${{ inputs.wait_seconds }}
+      run: |
+        if [ -z "${HOOK_URL}" ]; then
+          echo "::error::render_deploy_hook is empty"
+          exit 1
+        fi
+
+        echo "::notice::Triggering ${SERVICE} redeploy on Render…"
+        # -o captures body, -w captures status. Render returns JSON like
+        # {"deploy":{"id":"dep-xxx"}} when the hook is configured properly.
+        STATUS=$(curl -s -o /tmp/render-resp.json -w "%{http_code}" \
+          --max-time 20 \
+          -X POST "${HOOK_URL}" \
+          -H "Content-Type: application/json" \
+          -d '{}' \
+          || echo 0)
+
+        echo "status_code=${STATUS}" >> "$GITHUB_OUTPUT"
+
+        if [ "${STATUS}" != "200" ] && [ "${STATUS}" != "201" ]; then
+          echo "::error::Render deploy hook returned HTTP ${STATUS}"
+          head -c 500 /tmp/render-resp.json 2>/dev/null
+          echo
+          exit 1
+        fi
+
+        # Best-effort deploy ID extraction (jq might not be installed)
+        DEPLOY_ID=$(grep -oE '"id"[[:space:]]*:[[:space:]]*"[^"]+"' /tmp/render-resp.json | head -1 | sed -E 's/.*"([^"]+)"$/\1/' || echo "")
+        echo "deploy_id=${DEPLOY_ID}" >> "$GITHUB_OUTPUT"
+
+        echo "::notice::Render accepted deploy. id=${DEPLOY_ID:-unknown}"
+
+        if [ "${WAIT}" -gt 0 ]; then
+          echo "::notice::Waiting ${WAIT}s for deploy to roll out…"
+          sleep "${WAIT}"
+        fi

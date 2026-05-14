@@ -39,6 +39,27 @@ on:
         required: false
         type: string
         default: 'passed'
+      # ---- CD inputs (V2.2) ----
+      deploy:
+        description: 'Build + push Docker image and trigger Render staging redeploy. Requires docker_* and render_deploy_hook secrets.'
+        required: false
+        type: boolean
+        default: false
+      image_repo:
+        description: 'Docker Hub repo (cochecheee/<repo>). Required when deploy=true.'
+        required: false
+        type: string
+        default: ''
+      dockerfile:
+        description: 'Path to Dockerfile relative to build_context.'
+        required: false
+        type: string
+        default: 'Dockerfile'
+      build_context:
+        description: 'Docker build context.'
+        required: false
+        type: string
+        default: '.'
     secrets:
       dashboard_url:
         description: 'chat-system MCP Gateway URL. Declared as a secret because GitHub disallows secret references in caller with-blocks.'
@@ -48,6 +69,16 @@ on:
         required: false
       nvd_api_key:
         description: 'NVD API key for Dep-Check (Java only). Optional but recommended.'
+        required: false
+      # ---- CD secrets (V2.2) ----
+      docker_username:
+        description: 'Docker Hub username. Required when deploy=true.'
+        required: false
+      docker_password:
+        description: 'Docker Hub access token. Required when deploy=true.'
+        required: false
+      render_deploy_hook:
+        description: 'Render Deploy Hook URL (Settings → Deploy Hook). Required when deploy=true.'
         required: false
 
 permissions:
@@ -86,3 +117,49 @@ jobs:
           dashboard-token: ${{ env.DASHBOARD_TOKEN }}
           pipeline-status: ${{ inputs.pipeline_status }}
           fail-on-error: 'false'
+
+  # ============================================================
+  # CD — Build image + deploy Render staging (V2.2)
+  # Runs only when caller sets `with: deploy: true`. Requires
+  # docker_username / docker_password / render_deploy_hook secrets.
+  # Independent from `sast:` so the deploy still fires even if a
+  # non-blocking SAST tool failed.
+  # ============================================================
+  cd:
+    name: CD (build + deploy)
+    needs: sast
+    if: ${{ inputs.deploy }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    # Bind secrets to env so step-level `if:` can reference them.
+    env:
+      DOCKER_USERNAME:    ${{ secrets.docker_username }}
+      DOCKER_PASSWORD:    ${{ secrets.docker_password }}
+      RENDER_DEPLOY_HOOK: ${{ secrets.render_deploy_hook }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build & push image
+        id: build
+        uses: cochecheee/sast-action/actions/build-image@master
+        with:
+          image_repo:      ${{ inputs.image_repo }}
+          dockerfile:      ${{ inputs.dockerfile }}
+          build_context:   ${{ inputs.build_context }}
+          docker_username: ${{ env.DOCKER_USERNAME }}
+          docker_password: ${{ env.DOCKER_PASSWORD }}
+
+      - name: Deploy to Render staging
+        if: env.RENDER_DEPLOY_HOOK != ''
+        uses: cochecheee/sast-action/actions/deploy-staging@master
+        with:
+          render_deploy_hook: ${{ env.RENDER_DEPLOY_HOOK }}
+          service_name: ${{ inputs.image_repo }}
+          wait_seconds: '0'
+
+      - name: Summary
+        shell: bash
+        run: |
+          echo "::notice::CD complete. Image: ${{ steps.build.outputs.image_tag }}"
