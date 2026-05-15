@@ -118,10 +118,8 @@ permissions:
   security-events: write
   actions: read
 
-# NOTE V2.7: composite `uses:` refs pinned to @verify-work while branch
-# is smoke-tested. SWAP to @master (or @v0.2.0 tag) khi merge sang master
-# — không sẽ fail "Set up job" với "Can't find action.yml" vì
-# security-gate chỉ có ở verify-work.
+# Composite `uses:` refs pinned to @master. Khi tag v0.2.0 release, swap
+# về @v0.2.0 để inheritor có thể pin version-stable.
 
 jobs:
   sast:
@@ -140,7 +138,7 @@ jobs:
           fetch-depth: 0
 
       - name: Run SAST suite
-        uses: cochecheee/sast-action/actions/sast-suite@verify-work
+        uses: cochecheee/sast-action/actions/sast-suite@master
         with:
           language: ${{ inputs.language }}
           semgrep-config: ${{ inputs.semgrep_config }}
@@ -148,7 +146,7 @@ jobs:
 
       - name: Notify chat-system dashboard
         if: env.DASHBOARD_URL != ''
-        uses: cochecheee/sast-action/actions/notify-dashboard@verify-work
+        uses: cochecheee/sast-action/actions/notify-dashboard@master
         with:
           dashboard-url:   ${{ env.DASHBOARD_URL }}
           dashboard-token: ${{ env.DASHBOARD_TOKEN }}
@@ -173,7 +171,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Run gate
-        uses: cochecheee/sast-action/actions/security-gate@verify-work
+        uses: cochecheee/sast-action/actions/security-gate@master
         with:
           fail_on_critical: ${{ inputs.gate_fail_on_critical }}
           fail_on_high:     ${{ inputs.gate_fail_on_high }}
@@ -205,7 +203,7 @@ jobs:
 
       - name: Build & push image
         id: build
-        uses: cochecheee/sast-action/actions/build-image@verify-work
+        uses: cochecheee/sast-action/actions/build-image@master
         with:
           image_repo:      ${{ inputs.image_repo }}
           dockerfile:      ${{ inputs.dockerfile }}
@@ -215,7 +213,7 @@ jobs:
 
       - name: Deploy to Render staging
         if: env.RENDER_DEPLOY_HOOK != ''
-        uses: cochecheee/sast-action/actions/deploy-staging@verify-work
+        uses: cochecheee/sast-action/actions/deploy-staging@master
         with:
           render_deploy_hook: ${{ env.RENDER_DEPLOY_HOOK }}
           service_name: ${{ inputs.image_repo }}
@@ -251,7 +249,7 @@ jobs:
         run: sleep 60
 
       - name: Run OWASP ZAP
-        uses: cochecheee/sast-action/actions/run-dast@verify-work
+        uses: cochecheee/sast-action/actions/run-dast@master
         with:
           target_url: ${{ inputs.staging_url }}
           scan_type:  ${{ inputs.dast_scan_type }}
@@ -259,7 +257,7 @@ jobs:
 
       - name: Notify chat-system (DAST done)
         if: env.DASHBOARD_URL != ''
-        uses: cochecheee/sast-action/actions/notify-dashboard@verify-work
+        uses: cochecheee/sast-action/actions/notify-dashboard@master
         with:
           dashboard-url:   ${{ env.DASHBOARD_URL }}
           dashboard-token: ${{ env.DASHBOARD_TOKEN }}
