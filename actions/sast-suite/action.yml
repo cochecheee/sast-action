@@ -39,6 +39,56 @@ runs:
           semgrep scan --config="${{ inputs.semgrep-config }}" \
           --sarif --output=reports/semgrep.sarif || true
 
+    # ----- CodeQL (Java / Python / JavaScript / Go) ---------------------
+    # Báo cáo tiến độ docx ch.4.2 — CodeQL là 1 trong 5 SAST tool bắt buộc.
+    # CodeQL only supports a fixed language matrix; map our `language` input.
+    # `init` builds the analysis DB; `autobuild` handles compiled langs.
+    # Output dropped vào reports/codeql.sarif theo profile naming.
+    - name: CodeQL — pick language
+      if: ${{ inputs.language == 'java' || inputs.language == 'python' || inputs.language == 'node' || inputs.language == 'go' }}
+      id: codeql_lang
+      shell: bash
+      run: |
+        case "${{ inputs.language }}" in
+          node) ql=javascript ;;
+          *)    ql="${{ inputs.language }}" ;;
+        esac
+        echo "name=$ql" >> "$GITHUB_OUTPUT"
+
+    - name: CodeQL — init
+      if: ${{ inputs.language == 'java' || inputs.language == 'python' || inputs.language == 'node' || inputs.language == 'go' }}
+      uses: github/codeql-action/init@v3
+      with:
+        languages: ${{ steps.codeql_lang.outputs.name }}
+        queries: security-and-quality
+
+    - name: CodeQL — autobuild
+      if: ${{ inputs.language == 'java' || inputs.language == 'go' }}
+      uses: github/codeql-action/autobuild@v3
+
+    - name: CodeQL — analyze
+      if: ${{ inputs.language == 'java' || inputs.language == 'python' || inputs.language == 'node' || inputs.language == 'go' }}
+      uses: github/codeql-action/analyze@v3
+      with:
+        output: reports/codeql
+        upload: never           # we ship via our own sast-reports artifact
+      continue-on-error: true   # don't block when CodeQL infra has hiccups
+
+    - name: CodeQL — pick SARIF
+      if: ${{ inputs.language == 'java' || inputs.language == 'python' || inputs.language == 'node' || inputs.language == 'go' }}
+      shell: bash
+      run: |
+        # CodeQL writes <lang>.sarif per category — pick the first one
+        # we find and copy as codeql.sarif (chat-system normalizer keys
+        # off the runs[].tool.driver.name field, not filename).
+        f=$(ls reports/codeql/*.sarif 2>/dev/null | head -1 || true)
+        if [ -n "$f" ]; then
+          cp "$f" reports/codeql.sarif
+          echo "CodeQL SARIF copied: $(wc -c < reports/codeql.sarif) bytes"
+        else
+          echo "CodeQL produced no SARIF — likely init failed (continue-on-error)"
+        fi
+
     # ----- Universal: Trivy filesystem scan -----------------------------
     - name: Trivy FS
       uses: aquasecurity/trivy-action@master

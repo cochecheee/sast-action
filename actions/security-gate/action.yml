@@ -1,0 +1,205 @@
+name: 'SAST Chat — Security Gate'
+description: >-
+  Báo cáo tiến độ docx ch.4.2 stage 7 — block pipeline nếu SAST/SCA output
+  vượt threshold severity. Parse SARIF + Trivy/Safety/DepCheck/npm-audit
+  JSON, đếm critical+high, fail job nếu vượt ngưỡng. Composite tự download
+  artifact `sast-reports-<run>` nên caller chỉ cần `needs: sast`.
+author: 'cocheche'
+branding:
+  icon: 'shield'
+  color: 'red'
+
+inputs:
+  reports_artifact:
+    description: 'Artifact name produced by sast-suite (default sast-reports-<run_number>).'
+    required: false
+    default: ''
+  fail_on_critical:
+    description: 'Fail job nếu count(critical) >= ngưỡng này. Default 1 = bất kỳ critical nào.'
+    required: false
+    default: '1'
+  fail_on_high:
+    description: 'Fail job nếu count(high) >= ngưỡng này. Default 5.'
+    required: false
+    default: '5'
+
+outputs:
+  critical_count:
+    description: 'Tổng số finding mức critical.'
+    value: ${{ steps.count.outputs.critical }}
+  high_count:
+    description: 'Tổng số finding mức high.'
+    value: ${{ steps.count.outputs.high }}
+  verdict:
+    description: 'pass | fail'
+    value: ${{ steps.count.outputs.verdict }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Download reports artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.reports_artifact != '' && inputs.reports_artifact || format('sast-reports-{0}', github.run_number) }}
+        path: gate-reports
+
+    - name: Install jq
+      shell: bash
+      run: |
+        which jq >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq jq)
+
+    - name: Count critical + high
+      id: count
+      shell: bash
+      env:
+        FAIL_CRITICAL: ${{ inputs.fail_on_critical }}
+        FAIL_HIGH:     ${{ inputs.fail_on_high }}
+      run: |
+        set -euo pipefail
+        cd gate-reports
+        ls -la
+
+        critical=0
+        high=0
+
+        # SARIF v2.1 — count results where rule.defaultConfiguration.level=error
+        # AND properties.security-severity numeric tier. Common SARIF tools tag
+        # severity in different ways; we OR together the conservative readings.
+        for f in *.sarif; do
+          [ -f "$f" ] || continue
+          echo "::group::SARIF $f"
+
+          # 1) level=="error" mapped as high baseline. Many SARIF tools (Semgrep,
+          #    CodeQL) only emit level; security-severity numeric (>=9.0 → crit)
+          #    is optional.
+          err_lvl=$(jq '[.runs[]?.results[]? | select(.level=="error")] | length' "$f" 2>/dev/null || echo 0)
+
+          # 2) security-severity numeric: >= 9.0 → critical, [7.0, 9.0) → high
+          crit_sev=$(jq '
+            [ .runs[]?.results[]?
+              | select((.properties."security-severity" // "0") | tonumber? >= 9.0)
+            ] | length
+          ' "$f" 2>/dev/null || echo 0)
+
+          high_sev=$(jq '
+            [ .runs[]?.results[]?
+              | select(
+                  ((.properties."security-severity" // "0") | tonumber?) as $s
+                  | $s != null and $s >= 7.0 and $s < 9.0
+                )
+            ] | length
+          ' "$f" 2>/dev/null || echo 0)
+
+          # 3) Trivy SARIF rare format — store severity in tags
+          trivy_crit=$(jq '
+            [ .runs[]?.results[]?
+              | .properties.tags[]? // empty
+              | select(. | ascii_downcase | startswith("severity:critical"))
+            ] | length
+          ' "$f" 2>/dev/null || echo 0)
+          trivy_high=$(jq '
+            [ .runs[]?.results[]?
+              | .properties.tags[]? // empty
+              | select(. | ascii_downcase | startswith("severity:high"))
+            ] | length
+          ' "$f" 2>/dev/null || echo 0)
+
+          fc=$((crit_sev + trivy_crit))
+          # Use the larger of err_level vs high_sev as the high estimate so we
+          # don't double-count a result that hits both signals.
+          fh=$(( err_lvl > high_sev ? err_lvl : high_sev ))
+          fh=$(( fh + trivy_high ))
+          critical=$((critical + fc))
+          high=$((high + fh))
+          echo "  → critical=$fc high=$fh"
+          echo "::endgroup::"
+        done
+
+        # Trivy JSON image scan — Results[].Vulnerabilities[].Severity
+        for f in trivy-image*.json trivy-fs*.json; do
+          [ -f "$f" ] || continue
+          echo "::group::Trivy JSON $f"
+          fc=$(jq '
+            [ .Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL") ]
+            | length
+          ' "$f" 2>/dev/null || echo 0)
+          fh=$(jq '
+            [ .Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH") ]
+            | length
+          ' "$f" 2>/dev/null || echo 0)
+          critical=$((critical + fc))
+          high=$((high + fh))
+          echo "  → critical=$fc high=$fh"
+          echo "::endgroup::"
+        done
+
+        # Safety JSON (legacy v2.x) — list of [package, version, ...]; treat
+        # every entry as high. Conservative — safety doesn't tag severity in
+        # the v2 schema we pin.
+        if [ -f safety.json ]; then
+          echo "::group::Safety"
+          fh=$(jq 'if type=="array" then length else 0 end' safety.json 2>/dev/null || echo 0)
+          high=$((high + fh))
+          echo "  → high=$fh"
+          echo "::endgroup::"
+        fi
+
+        # OWASP Dep-Check JSON (Java)
+        if [ -f depcheck.json ]; then
+          echo "::group::DepCheck"
+          fc=$(jq '
+            [ .dependencies[]?.vulnerabilities[]?
+              | select((.severity // "" | ascii_upcase) == "CRITICAL")
+            ] | length
+          ' depcheck.json 2>/dev/null || echo 0)
+          fh=$(jq '
+            [ .dependencies[]?.vulnerabilities[]?
+              | select((.severity // "" | ascii_upcase) == "HIGH")
+            ] | length
+          ' depcheck.json 2>/dev/null || echo 0)
+          critical=$((critical + fc))
+          high=$((high + fh))
+          echo "  → critical=$fc high=$fh"
+          echo "::endgroup::"
+        fi
+
+        # npm audit JSON
+        if [ -f npm-audit.json ]; then
+          echo "::group::npm audit"
+          fc=$(jq '.metadata.vulnerabilities.critical // 0' npm-audit.json 2>/dev/null || echo 0)
+          fh=$(jq '.metadata.vulnerabilities.high // 0' npm-audit.json 2>/dev/null || echo 0)
+          critical=$((critical + fc))
+          high=$((high + fh))
+          echo "  → critical=$fc high=$fh"
+          echo "::endgroup::"
+        fi
+
+        echo "==============================================="
+        echo "TOTAL critical=$critical high=$high"
+        echo "Threshold critical>=${FAIL_CRITICAL} high>=${FAIL_HIGH}"
+        echo "==============================================="
+
+        echo "critical=$critical" >> "$GITHUB_OUTPUT"
+        echo "high=$high"         >> "$GITHUB_OUTPUT"
+
+        verdict=pass
+        if [ "$critical" -ge "$FAIL_CRITICAL" ] || [ "$high" -ge "$FAIL_HIGH" ]; then
+          verdict=fail
+        fi
+        echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+
+        # Summary annotation cho GitHub Actions UI
+        {
+          echo "## Security Gate — verdict: ${verdict^^}"
+          echo ""
+          echo "| Severity | Count | Threshold (fail at) |"
+          echo "|----------|-------|---------------------|"
+          echo "| CRITICAL | $critical | $FAIL_CRITICAL |"
+          echo "| HIGH     | $high     | $FAIL_HIGH     |"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "$verdict" = "fail" ]; then
+          echo "::error::Security Gate FAILED — critical=$critical high=$high (threshold critical>=${FAIL_CRITICAL} high>=${FAIL_HIGH})"
+          exit 1
+        fi
+        echo "::notice::Security Gate PASSED — critical=$critical high=$high"

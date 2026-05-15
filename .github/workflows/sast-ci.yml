@@ -76,6 +76,22 @@ on:
         required: false
         type: string
         default: 'baseline'
+      # ---- Security Gate inputs (V2.7) ----
+      gate_enabled:
+        description: 'Báo cáo tiến độ docx ch.4.2 stage 7 — block job if critical/high vượt threshold. Default true (chỉ pass nếu 0 critical).'
+        required: false
+        type: boolean
+        default: true
+      gate_fail_on_critical:
+        description: 'Số critical findings tối thiểu để fail. Default 1.'
+        required: false
+        type: number
+        default: 1
+      gate_fail_on_high:
+        description: 'Số high findings tối thiểu để fail. Default 5.'
+        required: false
+        type: number
+        default: 5
     secrets:
       dashboard_url:
         description: 'chat-system MCP Gateway URL. Declared as a secret because GitHub disallows secret references in caller with-blocks.'
@@ -101,6 +117,9 @@ permissions:
   contents: read
   security-events: write
   actions: read
+
+# Composite `uses:` refs pinned to @master. Khi tag v0.2.0 release, swap
+# về @v0.2.0 để inheritor có thể pin version-stable.
 
 jobs:
   sast:
@@ -135,16 +154,41 @@ jobs:
           fail-on-error: 'false'
 
   # ============================================================
+  # Security Gate — V2.7 / báo cáo tiến độ docx ch.4.2 stage 7
+  # Parse sast-reports artifact, đếm critical+high. Fail nếu vượt
+  # threshold → CD + DAST không chạy → block PR / merge.
+  # Inheritor có thể tắt: `with: gate_enabled: false`.
+  # ============================================================
+  gate:
+    name: Security Gate
+    needs: sast
+    if: ${{ inputs.gate_enabled }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run gate
+        uses: cochecheee/sast-action/actions/security-gate@master
+        with:
+          fail_on_critical: ${{ inputs.gate_fail_on_critical }}
+          fail_on_high:     ${{ inputs.gate_fail_on_high }}
+
+  # ============================================================
   # CD — Build image + deploy Render staging (V2.2)
   # Runs only when caller sets `with: deploy: true`. Requires
   # docker_username / docker_password / render_deploy_hook secrets.
-  # Independent from `sast:` so the deploy still fires even if a
-  # non-blocking SAST tool failed.
+  # `needs: [sast, gate]` — chỉ deploy khi SAST xong + gate pass.
+  # Khi gate_enabled=false, gate job skipped → vẫn deploy (back-compat).
   # ============================================================
   cd:
     name: CD (build + deploy)
-    needs: sast
-    if: ${{ inputs.deploy }}
+    needs: [sast, gate]
+    # Cho phép chạy khi gate skipped (gate_enabled=false) hoặc gate success.
+    # Không dùng always() vì muốn block khi gate fail hoặc sast fail.
+    if: ${{ inputs.deploy && needs.sast.result == 'success' && (needs.gate.result == 'success' || needs.gate.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -188,7 +232,7 @@ jobs:
   dast:
     name: DAST (ZAP ${{ inputs.dast_scan_type }})
     needs: cd
-    if: ${{ inputs.dast && inputs.staging_url != '' }}
+    if: ${{ inputs.dast && inputs.staging_url != '' && needs.cd.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
