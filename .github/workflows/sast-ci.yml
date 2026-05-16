@@ -92,6 +92,16 @@ on:
         required: false
         type: number
         default: 5
+      # ---- V3.1 Tier 4 — mcp learning loop ----
+      mcp_project_id:
+        description: >-
+          Khi set, gate sẽ query mcp /findings/gate-count?project_id=<id>&run_id=<run>
+          để dùng counts đã loại bỏ REVOKED (developer-triaged FP). Cho phép pipeline
+          pass dần sau khi team triage, không cần code change. Yêu cầu mcp gateway URL
+          truyền qua `dashboard_url` secret.
+        required: false
+        type: number
+        default: 0
     secrets:
       dashboard_url:
         description: 'chat-system MCP Gateway URL. Declared as a secret because GitHub disallows secret references in caller with-blocks.'
@@ -175,6 +185,10 @@ jobs:
         with:
           fail_on_critical: ${{ inputs.gate_fail_on_critical }}
           fail_on_high:     ${{ inputs.gate_fail_on_high }}
+          # V3.1 Tier 4 — pass mcp URL + project_id so the gate excludes
+          # REVOKED findings when computing critical/high counts.
+          mcp_gateway_url:  ${{ secrets.dashboard_url }}
+          mcp_project_id:   ${{ inputs.mcp_project_id > 0 && inputs.mcp_project_id || '' }}
 
   # ============================================================
   # CD — Build image + deploy Render staging (V2.2)

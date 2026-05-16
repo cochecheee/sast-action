@@ -22,6 +22,19 @@ inputs:
     description: 'Fail job nếu count(high) >= ngưỡng này. Default 5.'
     required: false
     default: '5'
+  mcp_gateway_url:
+    description: >-
+      Optional mcp Gateway URL (e.g. https://mcp-l958.onrender.com). If set,
+      the gate also queries mcp /findings/gate-count for the current run id
+      and prefers those counts (which exclude REVOKED findings). Lets a
+      pipeline pass on the next run after a developer triages false
+      positives, without code changes. V3.1 Tier 4.
+    required: false
+    default: ''
+  mcp_project_id:
+    description: 'Optional mcp project id to scope the gate-count query. Required when mcp_gateway_url is set.'
+    required: false
+    default: ''
 
 outputs:
   critical_count:
@@ -175,9 +188,27 @@ runs:
         fi
 
         echo "==============================================="
-        echo "TOTAL critical=$critical high=$high"
+        echo "TOTAL critical=$critical high=$high (raw, pre-mcp adjustment)"
         echo "Threshold critical>=${FAIL_CRITICAL} high>=${FAIL_HIGH}"
         echo "==============================================="
+
+        MCP_URL='${{ inputs.mcp_gateway_url }}'
+        MCP_PID='${{ inputs.mcp_project_id }}'
+        if [ -n "$MCP_URL" ] && [ -n "$MCP_PID" ]; then
+          echo "::group::mcp gate-count (V3.1 — REVOKED findings excluded)"
+          mcp_resp=$(curl -fsS "${MCP_URL%/}/findings/gate-count?project_id=${MCP_PID}&run_id=${GITHUB_RUN_ID}" 2>&1) || mcp_resp=""
+          if [ -n "$mcp_resp" ] && echo "$mcp_resp" | jq -e . >/dev/null 2>&1; then
+            mcp_crit=$(echo "$mcp_resp" | jq -r '.critical // 0')
+            mcp_high=$(echo "$mcp_resp" | jq -r '.high // 0')
+            echo "  raw : critical=$critical high=$high"
+            echo "  mcp : critical=$mcp_crit high=$mcp_high"
+            critical=$mcp_crit
+            high=$mcp_high
+          else
+            echo "::warning::mcp gate-count unavailable, using raw counts. Response: $mcp_resp"
+          fi
+          echo "::endgroup::"
+        fi
 
         echo "critical=$critical" >> "$GITHUB_OUTPUT"
         echo "high=$high"         >> "$GITHUB_OUTPUT"
