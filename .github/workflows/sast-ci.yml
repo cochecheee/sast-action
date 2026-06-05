@@ -128,6 +128,12 @@ permissions:
   security-events: write
   actions: read
 
+# Opt every JavaScript action into the Node.js 24 runtime now. GitHub forces
+# this on 2026-06-16 and warns on Node 20 until then; setting it early silences
+# the deprecation warning without bumping each action's major version.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 # Composite `uses:` refs pinned to @master. Khi tag v0.2.0 release, swap
 # về @v0.2.0 để inheritor có thể pin version-stable.
 
