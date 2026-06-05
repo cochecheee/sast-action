@@ -122,121 +122,99 @@ artifact bị tắt). Khuyến nghị: dùng poller.
 
 ---
 
-## 4. Trạng thái chat-system hiện tại (đã kiểm chứng trên `master`)
+## 4. Trạng thái chat-system hiện tại (đã kiểm chứng trên branch `ft/imp-fe`)
 
-`mcp/src/main.py` mới là **skeleton 29 dòng** — chỉ có `/` và `/health`.
-`requirements.txt` + `.env.example` cho thấy thiết kế dự kiến:
+> ⚠️ Branch `master` chỉ là **skeleton 29 dòng** (`/` + `/health`) — KHÔNG phản
+> ánh hiện trạng. Bản triển khai thật nằm ở branch **`ft/imp-fe`**. Đừng đánh giá
+> hệ thống qua `master`.
 
-- FastAPI + SQLAlchemy + aiosqlite (DB `mcp.db`)
-- SARIF: `sarif-pydantic`, `cwe2`, `cvss`, `detect-secrets`, `defusedxml`
-- AI: `google-genai` (Gemini) — phân tích/triage finding
-- Poller: `GITHUB_TOKEN` (actions:read, contents:read), `POLLING_INTERVAL_SECONDS=300`,
-  `POLLING_WORKFLOW_NAME="Security Scans"` ⚠️ (biến cứng — xem §5.1, nên bỏ)
-- Auth JWT (`SECRET_KEY`), rate-limit (`slowapi`)
+MCP Gateway đã được triển khai gần đầy đủ (FastAPI + SQLAlchemy/aiosqlite +
+Gemini). Những gì sast-action cần **đều đã có sẵn**:
 
-→ **3 endpoint mà sast-action gọi đều CHƯA được implement.** Đang nằm ở
-`.planning/phases/02-mcp-gateway-server-development/`.
+| Thành phần | Vị trí (`ft/imp-fe`) | Trạng thái |
+|---|---|---|
+| `POST /webhook/pipeline-complete` (202) | `mcp/src/api/artifacts.py` | ✅ có |
+| `POST /artifacts/process` | `mcp/src/api/artifacts.py` | ✅ có |
+| `GET /findings/gate-count` | `mcp/src/api/findings.py` | ✅ có |
+| Poller nền | `mcp/src/services/poller.py` | ✅ có — **multi-tenant** |
+| Lọc artifact theo profile | `mcp/src/services/processor.py` + `config/profiles/github-actions-default.yml` | ✅ profile đã match `sast-reports-*` |
+| DB `Project` + `Finding(status)` | `mcp/src/models/entities.py` | ✅ có (status hỗ trợ triage/REVOKED) |
+| Đa project | `Project.polling_workflow_name`, `GitHubClient.for_project()` | ✅ credentials/config theo từng project |
+
+→ Đa số "khoảng trống" ở các bản nháp trước (dựa trên `master`) thực ra **đã được
+lấp**. Phần thật sự còn lại xem §5.
 
 ---
 
-## 5. Khoảng trống tương thích & cách cải tiến
+## 5. Trạng thái cải tiến & việc còn lại
 
-### 5.1 ❗ Đừng lọc theo tên workflow — key theo artifact convention
+### 5.1 ✅ Name-agnostic poller — ĐÃ LÀM (PR `fix/poller-name-agnostic`)
 
-- **Vấn đề gốc**: `.env.example` đặt một biến **toàn cục**
-  `POLLING_WORKFLOW_NAME="Security Scans"`. Đây là anti-pattern cho một dashboard
-  đa-project: mỗi repo kế thừa tự đặt tên workflow riêng (`CI Workflow`,
-  `Security`, `build`...). Một biến cứng chỉ match được đúng 1 tên → bỏ sót mọi
-  project khác.
+**Vấn đề trước đây**: poller lọc run theo **tên workflow chính xác**
+(`github_client.list_workflow_runs` filter `r["name"] == workflow_name`), default
+cứng `"CI Workflow"`. Repo đặt tên khác (hoặc quên set per-project) → **miss run**.
+Ép mọi repo đổi tên giống nhau là anti-pattern, phá điểm mạnh "drop 1 block là chạy".
 
-- **Tại sao "đổi env cho khớp" là sai**: nó ép *mọi* project phải đổi tên workflow
-  giống nhau, phá đúng điểm mạnh "drop 1 block là chạy" của sast-action.
+**Hợp đồng thật của sast-action không phải tên workflow mà là tên artifact**:
+`sast-suite` luôn upload `sast-reports-<run_number>`, và profile
+`github-actions-default.yml` đã match prefix đó.
 
-- **Hợp đồng thật của sast-action KHÔNG phải tên workflow, mà là tên artifact**:
-  `sast-suite` luôn upload `sast-reports-<run_number>` bất kể workflow tên gì →
-  hãy key vào đó.
+**Đã sửa**: `POLLING_WORKFLOW_NAME` và `Project.polling_workflow_name` default về
+`""` (= match mọi run). Bộ lọc thật là **artifact profile** trong
+`processor.process_run`. Mỗi repo đặt tên workflow tùy ý mà poller không miss; vẫn
+có thể set tên (global hoặc per-project) để thu hẹp polling khi cần tiết kiệm API.
+Kèm test khóa hợp đồng "tên rỗng = trả mọi run".
 
-- **Thiết kế đúng (3 lớp, ưu tiên từ trên xuống):**
-  1. **Webhook là đường chính** — `/webhook/pipeline-complete` đã gửi `run_id` +
-     `repository`. MCP nhận event là biết chính xác run nào → pull thẳng artifact
-     của run đó. **Không cần tên workflow.**
-  2. **Poller fallback lọc theo artifact, không theo tên workflow** — list recent
-     runs của repo, run nào có artifact khớp prefix `sast-reports-` thì xử lý. Bỏ
-     hẳn `POLLING_WORKFLOW_NAME`.
-  3. **Cấu hình theo project, không toàn cục** — chuyển `repo` (và *tùy chọn*
-     `workflow_name`, nullable = match-any) vào bảng `Project` trong DB. Mỗi
-     project tự khai; poller lặp qua các project đang active.
+Hai lớp matching thực tế trong code (đã có sẵn, nay name-agnostic):
+1. **Webhook** `/webhook/pipeline-complete` gửi `run_id` → MCP pull thẳng run đó,
+   không cần tên workflow.
+2. **Poller** list mọi completed run → `processor.process_run` lọc artifact theo
+   profile → chỉ artifact `sast-reports-*` (hoặc report khác trong profile) sinh
+   findings.
 
-  ```python
-  # Poller (mỗi project) — KHÔNG dùng POLLING_WORKFLOW_NAME
-  for project in db.active_projects():                       # lớp 3: per-project
-      runs = gh.list_workflow_runs(project.repo, status="completed", per_page=20)
-      for run in runs:
-          if db.already_processed(run.id):                  # idempotent
-              continue
-          arts = gh.list_run_artifacts(project.repo, run.id)
-          if any(a.name.startswith("sast-reports-") for a in arts):  # lớp 2: theo artifact
-              process(project, run, arts)
-  ```
+> **Migrate**: default mới chỉ áp project **tạo mới**. Project đã có trong DB vẫn
+> giữ `"CI Workflow"` — set `polling_workflow_name=""` qua UI/API để name-agnostic.
+> Không cần DB migration (default Python-side, không đổi schema).
 
-- **`.env` sau khi sửa**: bỏ `POLLING_WORKFLOW_NAME`, bỏ `GITHUB_OWNER`/`GITHUB_REPO`
-  toàn cục (đưa vào bảng `Project`); chỉ giữ `POLLING_INTERVAL_SECONDS` và
-  `GITHUB_TOKEN` (token đọc Actions/Contents).
+### 5.2 ✅ Ba endpoint — ĐÃ CÓ trên `ft/imp-fe`
+- `POST /webhook/pipeline-complete` → 202 (`artifacts.py`)
+- `POST /artifacts/process` (`artifacts.py`)
+- `GET /findings/gate-count?project_id=&run_id=` → `{critical, high}` loại REVOKED
+  (`findings.py`). Gate tự fallback raw counts nếu endpoint lỗi/timeout.
 
-- **Phía sast-action**: *không cần đổi gì* — contract `sast-reports-<run>` vốn đã
-  độc lập với tên workflow. Đây thuần là lựa chọn thiết kế cần sửa ở chat-system.
+### 5.3 ✅ DB learning loop — ĐÃ CÓ
+`Project` + `Finding(status)` đã tồn tại; `gate-count` đếm loại finding đã triage.
+Dashboard đã có thao tác flag/triage finding → đúng vòng học V3.1.
 
-### 5.2 Implement 3 endpoint (phase 02)
-```
-POST /webhook/pipeline-complete   # nhận metadata, đẩy vào hàng đợi pull artifact
-POST /artifacts/process           # nhận {project_id, artifact_name, content SARIF}
-GET  /findings/gate-count         # ?project_id=&run_id= → {critical, high} loại REVOKED
-```
-- `/webhook/pipeline-complete` trả **HTTP 202** (notify-dashboard coi 202 =
-  accepted; khác 202 chỉ là warning, không fail CI).
-- `/findings/gate-count` phải nhanh (gate có timeout 5 phút) và trả JSON đúng
-  schema `{"critical": <int>, "high": <int>}`; nếu lỗi, gate tự fallback raw counts.
+### 5.4 ⚠️ Còn nên rà — severity mapping nhất quán
+security-gate (bash) map `security-severity` numeric (≥9.0 crit / 7.0–9.0 high) +
+`level==error`. Cần đảm bảo normalizer của MCP cho ra critical/high **khớp** raw
+counts để `gate-count` không lệch (tránh "raw fail nhưng mcp pass"). Đối chiếu với
+`tests/test_normalizer_severity_v38.py`.
 
-### 5.3 DB schema tối thiểu cho learning loop
-```
-Project(id, repo, ...)
-Finding(id, project_id, run_id, rule_id, severity, status, ...)
-  status ∈ {ACTIVE, REVOKED}   # REVOKED = dev xác nhận false-positive
-```
-- `gate-count` = `COUNT(*) WHERE project_id=? AND run_id=? AND status='ACTIVE'`
-  group theo severity (critical/high).
-- Dashboard cần nút REVOKE/un-REVOKE → đây chính là vòng học của V3.1.
+### 5.5 ⚠️ Còn nên rà — auth token 2 phía
+- webhook: `Authorization: Bearer` ↔ `CI_WEBHOOK_TOKEN`
+- artifacts/process: `X-API-Key` ↔ `CI_API_KEY`
+- gate-count: xác nhận policy auth (GET có cần token không) khớp cả CI lẫn MCP.
 
-### 5.4 Thống nhất severity mapping
-- security-gate map theo `security-severity` numeric (9.0 crit / 7.0–9.0 high) và
-  `level==error`. MCP khi parse SARIF nên **dùng cùng quy tắc** (qua `cvss`/`cwe2`)
-  để counts của `gate-count` khớp raw counts của gate → tránh "raw fail nhưng mcp
-  pass" do lệch cách quy đổi.
-
-### 5.5 Auth nhất quán
-- notify-dashboard gửi `Authorization: Bearer <dashboard_token>` → MCP so với
-  `CI_WEBHOOK_TOKEN`.
-- aggregate-sarif gửi `X-API-Key` → MCP so với `CI_API_KEY`.
-- gate-count hiện **không gắn token** → nên cho phép GET không auth hoặc thêm
-  header tương ứng ở cả 2 phía.
-
-### 5.6 Wiring `project_id` từ CI
-- Để bật learning loop, caller ALOUTE phải set `mcp_project_id: <Project.id>`
-  (hiện để 0 = tắt). `Project.id` lấy từ DB chat-system sau khi tạo project.
+### 5.6 ⬜ Wiring `project_id` từ CI — việc của người dùng
+Caller ALOUTE set `mcp_project_id: <Project.id>` (hiện 0 = tắt) để bật learning
+loop. `Project.id` lấy từ DB sau khi tạo project trên dashboard.
 
 ---
 
 ## 6. Checklist tích hợp (ALOUTE ↔ chat-system)
 
 - [x] Caller ALOUTE `ci.yml` gọi reusable `@master`, language=java
-- [x] Artifact name `sast-reports-<run_number>` (sast-suite ↔ poller khớp)
+- [x] Artifact name `sast-reports-<run_number>` (sast-suite ↔ profile khớp)
 - [x] 5 SAST tool chạy được (đã fix SpotBugs/commons-lang3, CodeQL v4)
-- [ ] MCP implement `/webhook/pipeline-complete` (202)
-- [ ] MCP implement poller — lọc theo artifact prefix `sast-reports-`, bỏ `POLLING_WORKFLOW_NAME` toàn cục, đưa repo vào bảng `Project`
-- [ ] MCP implement `/findings/gate-count` + DB Project/Finding(status)
-- [ ] Dashboard có nút REVOKE finding
+- [x] MCP `/webhook/pipeline-complete` (202) — có trên `ft/imp-fe`
+- [x] MCP poller multi-tenant + name-agnostic (PR `fix/poller-name-agnostic`)
+- [x] MCP `/findings/gate-count` + DB `Project`/`Finding(status)` — có
+- [x] Dashboard triage/flag finding — có
+- [ ] Merge PR `fix/poller-name-agnostic`; set `polling_workflow_name=""` cho project cũ
 - [ ] Set `mcp_project_id` ở caller để bật V3.1 loop
-- [ ] Thống nhất severity mapping & auth token 2 phía
+- [ ] Rà severity mapping & auth token 2 phía (§5.4–5.5)
 
 ---
 
@@ -244,5 +222,7 @@ Finding(id, project_id, run_id, rule_id, severity, status, ...)
 
 - Reusable: `cochecheee/sast-action/.github/workflows/sast-ci.yml@master`
 - Webhook contract: xem `README.md` mục "Webhook contract"
-- MCP skeleton: `cochecheee/ChatSystem` → `mcp/src/main.py`
-- Phase MCP: `cochecheee/ChatSystem` → `.planning/phases/02-mcp-gateway-server-development/`
+- MCP (bản thật): `cochecheee/ChatSystem` branch **`ft/imp-fe`** → `mcp/src/api/`,
+  `mcp/src/services/poller.py`, `mcp/src/services/processor.py`
+- Artifact profile: `mcp/config/profiles/github-actions-default.yml`
+- ⚠️ `master` chỉ là skeleton 29 dòng — KHÔNG dùng để đánh giá hiện trạng.
