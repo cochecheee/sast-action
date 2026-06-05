@@ -131,7 +131,7 @@ artifact bị tắt). Khuyến nghị: dùng poller.
 - SARIF: `sarif-pydantic`, `cwe2`, `cvss`, `detect-secrets`, `defusedxml`
 - AI: `google-genai` (Gemini) — phân tích/triage finding
 - Poller: `GITHUB_TOKEN` (actions:read, contents:read), `POLLING_INTERVAL_SECONDS=300`,
-  `POLLING_WORKFLOW_NAME="Security Scans"`
+  `POLLING_WORKFLOW_NAME="Security Scans"` ⚠️ (biến cứng — xem §5.1, nên bỏ)
 - Auth JWT (`SECRET_KEY`), rate-limit (`slowapi`)
 
 → **3 endpoint mà sast-action gọi đều CHƯA được implement.** Đang nằm ở
@@ -141,15 +141,50 @@ artifact bị tắt). Khuyến nghị: dùng poller.
 
 ## 5. Khoảng trống tương thích & cách cải tiến
 
-### 5.1 ❗ Tên workflow lệch — poller sẽ không thấy run
-- **Vấn đề**: `.env.example` đặt `POLLING_WORKFLOW_NAME="Security Scans"`, nhưng
-  workflow caller của ALOUTE tên **`CI Workflow`**. Poller lọc theo tên → bỏ sót
-  toàn bộ run.
-- **Fix (chọn 1)**:
-  - Đổi `POLLING_WORKFLOW_NAME=CI Workflow` trong `.env` của MCP, **hoặc**
-  - Đổi `name:` của caller workflow thành `Security Scans` (lưu ý: hiện đang giữ
-    tên `CI Workflow` để `cd.yml` còn trigger được — nếu đổi phải sửa cả `cd.yml`).
-- Khuyến nghị: đổi env phía MCP (ít rủi ro hơn).
+### 5.1 ❗ Đừng lọc theo tên workflow — key theo artifact convention
+
+- **Vấn đề gốc**: `.env.example` đặt một biến **toàn cục**
+  `POLLING_WORKFLOW_NAME="Security Scans"`. Đây là anti-pattern cho một dashboard
+  đa-project: mỗi repo kế thừa tự đặt tên workflow riêng (`CI Workflow`,
+  `Security`, `build`...). Một biến cứng chỉ match được đúng 1 tên → bỏ sót mọi
+  project khác.
+
+- **Tại sao "đổi env cho khớp" là sai**: nó ép *mọi* project phải đổi tên workflow
+  giống nhau, phá đúng điểm mạnh "drop 1 block là chạy" của sast-action.
+
+- **Hợp đồng thật của sast-action KHÔNG phải tên workflow, mà là tên artifact**:
+  `sast-suite` luôn upload `sast-reports-<run_number>` bất kể workflow tên gì →
+  hãy key vào đó.
+
+- **Thiết kế đúng (3 lớp, ưu tiên từ trên xuống):**
+  1. **Webhook là đường chính** — `/webhook/pipeline-complete` đã gửi `run_id` +
+     `repository`. MCP nhận event là biết chính xác run nào → pull thẳng artifact
+     của run đó. **Không cần tên workflow.**
+  2. **Poller fallback lọc theo artifact, không theo tên workflow** — list recent
+     runs của repo, run nào có artifact khớp prefix `sast-reports-` thì xử lý. Bỏ
+     hẳn `POLLING_WORKFLOW_NAME`.
+  3. **Cấu hình theo project, không toàn cục** — chuyển `repo` (và *tùy chọn*
+     `workflow_name`, nullable = match-any) vào bảng `Project` trong DB. Mỗi
+     project tự khai; poller lặp qua các project đang active.
+
+  ```python
+  # Poller (mỗi project) — KHÔNG dùng POLLING_WORKFLOW_NAME
+  for project in db.active_projects():                       # lớp 3: per-project
+      runs = gh.list_workflow_runs(project.repo, status="completed", per_page=20)
+      for run in runs:
+          if db.already_processed(run.id):                  # idempotent
+              continue
+          arts = gh.list_run_artifacts(project.repo, run.id)
+          if any(a.name.startswith("sast-reports-") for a in arts):  # lớp 2: theo artifact
+              process(project, run, arts)
+  ```
+
+- **`.env` sau khi sửa**: bỏ `POLLING_WORKFLOW_NAME`, bỏ `GITHUB_OWNER`/`GITHUB_REPO`
+  toàn cục (đưa vào bảng `Project`); chỉ giữ `POLLING_INTERVAL_SECONDS` và
+  `GITHUB_TOKEN` (token đọc Actions/Contents).
+
+- **Phía sast-action**: *không cần đổi gì* — contract `sast-reports-<run>` vốn đã
+  độc lập với tên workflow. Đây thuần là lựa chọn thiết kế cần sửa ở chat-system.
 
 ### 5.2 Implement 3 endpoint (phase 02)
 ```
@@ -197,7 +232,7 @@ Finding(id, project_id, run_id, rule_id, severity, status, ...)
 - [x] Artifact name `sast-reports-<run_number>` (sast-suite ↔ poller khớp)
 - [x] 5 SAST tool chạy được (đã fix SpotBugs/commons-lang3, CodeQL v4)
 - [ ] MCP implement `/webhook/pipeline-complete` (202)
-- [ ] MCP implement poller (sửa `POLLING_WORKFLOW_NAME`)
+- [ ] MCP implement poller — lọc theo artifact prefix `sast-reports-`, bỏ `POLLING_WORKFLOW_NAME` toàn cục, đưa repo vào bảng `Project`
 - [ ] MCP implement `/findings/gate-count` + DB Project/Finding(status)
 - [ ] Dashboard có nút REVOKE finding
 - [ ] Set `mcp_project_id` ở caller để bật V3.1 loop
