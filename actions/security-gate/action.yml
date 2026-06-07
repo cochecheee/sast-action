@@ -35,6 +35,14 @@ inputs:
     description: 'Optional mcp project id to scope the gate-count query. Required when mcp_gateway_url is set.'
     required: false
     default: ''
+  mcp_token:
+    description: >-
+      Bearer token for the gate-count call (matches chat-system CI_WEBHOOK_TOKEN
+      or a per-project webhook token). Required when the gateway has
+      ANONYMOUS_READ_ENABLED=false (default) — otherwise gate-count returns 401
+      and the gate silently falls back to raw SARIF, ignoring REVOKED findings.
+    required: false
+    default: ''
 
 outputs:
   critical_count:
@@ -194,18 +202,41 @@ runs:
 
         MCP_URL='${{ inputs.mcp_gateway_url }}'
         MCP_PID='${{ inputs.mcp_project_id }}'
+        MCP_TOKEN='${{ inputs.mcp_token }}'
         if [ -n "$MCP_URL" ] && [ -n "$MCP_PID" ]; then
-          echo "::group::mcp gate-count (V3.1 — REVOKED findings excluded)"
-          mcp_resp=$(curl -fsS "${MCP_URL%/}/findings/gate-count?project_id=${MCP_PID}&run_id=${GITHUB_RUN_ID}" 2>&1) || mcp_resp=""
-          if [ -n "$mcp_resp" ] && echo "$mcp_resp" | jq -e . >/dev/null 2>&1; then
+          echo "::group::mcp gate-count (V3.1 Tier 4 — REVOKED findings excluded)"
+          # Send the bearer token — gate-count is behind auth when
+          # ANONYMOUS_READ_ENABLED=false. Without it the call 401s and we'd
+          # silently fall back to raw SARIF (ignoring developer-triaged FPs).
+          AUTH=()
+          [ -n "$MCP_TOKEN" ] && AUTH=(-H "Authorization: Bearer ${MCP_TOKEN}")
+          GATE_URL="${MCP_URL%/}/findings/gate-count?project_id=${MCP_PID}&run_id=${GITHUB_RUN_ID}"
+
+          # chat-system ingests this run asynchronously (webhook → background
+          # process_run). Poll until run_ingested=true so we don't read 0/0
+          # before ingest and PASS for the wrong reason. Tunable via env.
+          attempts="${MCP_POLL_ATTEMPTS:-24}"; delay="${MCP_POLL_DELAY:-5}"
+          mcp_resp=""; ingested="false"
+          for i in $(seq 1 "$attempts"); do
+            mcp_resp=$(curl -fsS "${AUTH[@]}" "$GATE_URL" 2>/dev/null) || mcp_resp=""
+            if [ -n "$mcp_resp" ] && echo "$mcp_resp" | jq -e . >/dev/null 2>&1; then
+              ingested=$(echo "$mcp_resp" | jq -r '.run_ingested // false')
+              [ "$ingested" = "true" ] && break
+            fi
+            echo "  [$i/$attempts] waiting for chat-system to ingest run ${GITHUB_RUN_ID}…"
+            sleep "$delay"
+          done
+
+          if [ "$ingested" = "true" ]; then
             mcp_crit=$(echo "$mcp_resp" | jq -r '.critical // 0')
             mcp_high=$(echo "$mcp_resp" | jq -r '.high // 0')
+            mcp_total=$(echo "$mcp_resp" | jq -r '.run_total // 0')
             echo "  raw : critical=$critical high=$high"
-            echo "  mcp : critical=$mcp_crit high=$mcp_high"
+            echo "  mcp : critical=$mcp_crit high=$mcp_high (run_total=$mcp_total, REVOKED excluded)"
             critical=$mcp_crit
             high=$mcp_high
           else
-            echo "::warning::mcp gate-count unavailable, using raw counts. Response: $mcp_resp"
+            echo "::warning::mcp gate-count not ready (not ingested / auth / unreachable) — using raw counts. Last response: ${mcp_resp:-<empty>}"
           fi
           echo "::endgroup::"
         fi

@@ -192,9 +192,12 @@ jobs:
           fail_on_critical: ${{ inputs.gate_fail_on_critical }}
           fail_on_high:     ${{ inputs.gate_fail_on_high }}
           # V3.1 Tier 4 — pass mcp URL + project_id so the gate excludes
-          # REVOKED findings when computing critical/high counts.
+          # REVOKED findings when computing critical/high counts. mcp_token is
+          # required (gate-count is behind auth); without it the call 401s and
+          # the gate ignores developer-triaged false-positives.
           mcp_gateway_url:  ${{ secrets.dashboard_url }}
           mcp_project_id:   ${{ inputs.mcp_project_id > 0 && inputs.mcp_project_id || '' }}
+          mcp_token:        ${{ secrets.dashboard_token }}
 
   # ============================================================
   # CD — Build image + deploy Render staging (V2.2)
