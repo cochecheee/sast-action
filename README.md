@@ -37,6 +37,61 @@ Pin to `@v0.2.0` once tagged.
 | `node`   | Semgrep, Trivy-FS | ESLint-security, npm-audit |
 | `go`     | Semgrep, Trivy-FS | gosec |
 
+## Per-project DAST + deploy
+
+DAST (OWASP ZAP) and deploy are opt-in per inheritor repo. The DAST job is
+**decoupled** from the reusable CD, so it works with either deploy model.
+
+### Model A — the project deploys itself (recommended)
+
+Your repo deploys however it already does (its own `cd.yml`, Render, etc.); the
+reusable just runs DAST against the live URL after SAST — independent of the
+gate verdict, so even a gate-failing app still gets scanned.
+
+```yaml
+jobs:
+  security:
+    uses: cochecheee/sast-action/.github/workflows/sast-ci.yml@master
+    with:
+      language: java
+      dast: true
+      staging_url: ${{ vars.STAGING_URL }}   # repo Variable (not a secret)
+      dast_scan_type: baseline               # baseline (~5m) | full (~30m)
+    secrets:
+      dashboard_url:   ${{ secrets.MCP_GATEWAY_URL }}
+      dashboard_token: ${{ secrets.MCP_WEBHOOK_TOKEN }}
+```
+
+`deploy` stays `false` (default). If `STAGING_URL` is unset, the DAST job skips
+safely.
+
+### Model B — the reusable builds, deploys, then scans
+
+```yaml
+jobs:
+  security:
+    uses: cochecheee/sast-action/.github/workflows/sast-ci.yml@master
+    with:
+      language: java
+      deploy: true
+      image_repo: cochecheee/<repo>
+      dast: true
+      staging_url: https://<repo>.onrender.com
+    secrets:
+      dashboard_url:      ${{ secrets.MCP_GATEWAY_URL }}
+      dashboard_token:    ${{ secrets.MCP_WEBHOOK_TOKEN }}
+      docker_username:    ${{ secrets.DOCKER_USERNAME }}
+      docker_password:    ${{ secrets.DOCKER_PASSWORD }}
+      render_deploy_hook: ${{ secrets.RENDER_DEPLOY_HOOK }}
+```
+
+Here DAST waits for the reusable CD to deploy a fresh image, then scans it. The
+security gate blocks CD (and therefore DAST) when it fails.
+
+DAST output is uploaded as artifact `dast-reports-<run>` (ZAP JSON/MD/HTML); the
+chat-system poller ingests `dast-reports-*` into findings. Full design notes:
+`docs/research-per-project-dast-deploy.md`.
+
 ## Layout
 
 ```
