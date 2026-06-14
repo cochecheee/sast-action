@@ -248,14 +248,24 @@ jobs:
           echo "::notice::CD complete. Image: ${{ steps.build.outputs.image_tag }}"
 
   # ============================================================
-  # DAST — Runtime security scan (V2.3)
-  # Runs ZAP baseline against the deployed staging URL. Independent
-  # job so it can wait for Render redeploy without blocking SAST/CD.
+  # DAST — Runtime security scan (V2.3 / decoupled V3.x)
+  # Decoupled from CD so per-project DAST works in BOTH models:
+  #   - deploy:true  → wait for the reusable CD to succeed, then scan the
+  #     freshly deployed image.
+  #   - deploy:false → the project deploys its own way (e.g. a separate
+  #     cd.yml). DAST then runs after SAST against the live `staging_url`
+  #     regardless of CD/gate — the app is live independent of this run's
+  #     gate verdict, so a deliberately-vulnerable demo can still be DAST-ed.
   # ============================================================
   dast:
     name: DAST (ZAP ${{ inputs.dast_scan_type }})
-    needs: cd
-    if: ${{ inputs.dast && inputs.staging_url != '' && needs.cd.result == 'success' }}
+    needs: [sast, gate, cd]
+    if: >-
+      ${{ !cancelled()
+        && inputs.dast
+        && inputs.staging_url != ''
+        && needs.sast.result == 'success'
+        && (needs.cd.result == 'success' || (!inputs.deploy && needs.cd.result == 'skipped')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -267,7 +277,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Only the reusable CD path needs to wait for Render to roll the new
+      # container. When the project deploys externally (deploy:false), its
+      # staging_url is already live — skip the wait.
       - name: Wait 60s for Render to roll new container
+        if: ${{ inputs.deploy }}
         shell: bash
         run: sleep 60
 
