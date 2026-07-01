@@ -4,6 +4,10 @@ description: >-
   with the names chat-system's processor expects. Picks the toolset
   based on the `language` input so an inheritor repo only declares the
   language and gets the right scans.
+
+  Set `tool` to run a SINGLE tool (parallel-matrix mode — the reusable
+  workflow spawns one job per tool). Leave `tool` empty to run the whole
+  suite as sequential steps in one job (back-compat).
 author: 'cocheche'
 branding:
   icon: 'shield'
@@ -17,10 +21,25 @@ inputs:
     description: 'Semgrep ruleset (auto|p/owasp-top-ten|...).'
     required: false
     default: 'auto'
+  tool:
+    description: >-
+      Run one tool only (semgrep|codeql|trivy-fs|bandit|safety|spotbugs|
+      depcheck|eslint|npm-audit|gosec). Empty = run every tool for the
+      language (sequential). Used by the reusable workflow's scan matrix
+      to fan the tools out into parallel jobs.
+    required: false
+    default: ''
   upload-individual-artifacts:
-    description: 'Upload one artifact per tool (true) or just merge then return paths (false).'
+    description: 'Upload the reports/ directory as an artifact (true) or just leave the files on disk (false).'
     required: false
     default: 'true'
+  artifact-name:
+    description: >-
+      Name of the uploaded artifact. Empty → sast-reports-<run_number>
+      (full-suite default). Matrix mode passes a per-tool name such as
+      sast-reports-<run_number>-<tool> so the merge job can stitch them.
+    required: false
+    default: ''
 
 outputs:
   reports-dir:
@@ -32,6 +51,7 @@ runs:
   steps:
     # ----- Universal: Semgrep (all languages) ---------------------------
     - name: Semgrep
+      if: ${{ inputs.tool == '' || inputs.tool == 'semgrep' }}
       shell: bash
       run: |
         mkdir -p reports
@@ -39,13 +59,17 @@ runs:
           semgrep scan --config="${{ inputs.semgrep-config }}" \
           --sarif --output=reports/semgrep.sarif || true
 
+    - name: Ensure reports dir
+      shell: bash
+      run: mkdir -p reports
+
     # ----- CodeQL (Java / Python / JavaScript / Go) ---------------------
     # Báo cáo tiến độ docx ch.4.2 — CodeQL là 1 trong 5 SAST tool bắt buộc.
     # CodeQL only supports a fixed language matrix; map our `language` input.
     # `init` builds the analysis DB; `autobuild` handles compiled langs.
     # Output dropped vào reports/codeql.sarif theo profile naming.
     - name: CodeQL — pick language
-      if: ${{ inputs.language == 'java' || inputs.language == 'python' || inputs.language == 'node' || inputs.language == 'go' }}
+      if: ${{ (inputs.tool == '' || inputs.tool == 'codeql') && (inputs.language == 'java' || inputs.language == 'python' || inputs.language == 'node' || inputs.language == 'go') }}
       id: codeql_lang
       shell: bash
       run: |
@@ -56,18 +80,18 @@ runs:
         echo "name=$ql" >> "$GITHUB_OUTPUT"
 
     - name: CodeQL — init
-      if: ${{ inputs.language == 'java' || inputs.language == 'python' || inputs.language == 'node' || inputs.language == 'go' }}
+      if: ${{ (inputs.tool == '' || inputs.tool == 'codeql') && (inputs.language == 'java' || inputs.language == 'python' || inputs.language == 'node' || inputs.language == 'go') }}
       uses: github/codeql-action/init@v4
       with:
         languages: ${{ steps.codeql_lang.outputs.name }}
         queries: security-and-quality
 
     - name: CodeQL — autobuild
-      if: ${{ inputs.language == 'java' || inputs.language == 'go' }}
+      if: ${{ (inputs.tool == '' || inputs.tool == 'codeql') && (inputs.language == 'java' || inputs.language == 'go') }}
       uses: github/codeql-action/autobuild@v4
 
     - name: CodeQL — analyze
-      if: ${{ inputs.language == 'java' || inputs.language == 'python' || inputs.language == 'node' || inputs.language == 'go' }}
+      if: ${{ (inputs.tool == '' || inputs.tool == 'codeql') && (inputs.language == 'java' || inputs.language == 'python' || inputs.language == 'node' || inputs.language == 'go') }}
       uses: github/codeql-action/analyze@v4
       with:
         output: reports/codeql
@@ -75,7 +99,7 @@ runs:
       continue-on-error: true   # don't block when CodeQL infra has hiccups
 
     - name: CodeQL — pick SARIF
-      if: ${{ inputs.language == 'java' || inputs.language == 'python' || inputs.language == 'node' || inputs.language == 'go' }}
+      if: ${{ (inputs.tool == '' || inputs.tool == 'codeql') && (inputs.language == 'java' || inputs.language == 'python' || inputs.language == 'node' || inputs.language == 'go') }}
       shell: bash
       run: |
         # CodeQL writes <lang>.sarif per category — pick the first one
@@ -91,6 +115,7 @@ runs:
 
     # ----- Universal: Trivy filesystem scan -----------------------------
     - name: Trivy FS
+      if: ${{ inputs.tool == '' || inputs.tool == 'trivy-fs' }}
       uses: aquasecurity/trivy-action@master
       with:
         scan-type: 'fs'
@@ -102,7 +127,7 @@ runs:
 
     # ----- Java: SpotBugs + Dep-Check -----------------------------------
     - name: Setup JDK 17
-      if: ${{ inputs.language == 'java' }}
+      if: ${{ (inputs.tool == '' || inputs.tool == 'spotbugs' || inputs.tool == 'depcheck') && inputs.language == 'java' }}
       uses: actions/setup-java@v4
       with:
         java-version: '17'
@@ -110,14 +135,14 @@ runs:
         cache: 'gradle'
 
     - name: SpotBugs (Java)
-      if: ${{ inputs.language == 'java' }}
+      if: ${{ (inputs.tool == '' || inputs.tool == 'spotbugs') && inputs.language == 'java' }}
       shell: bash
       run: |
         ./gradlew compileJava spotbugsMain --no-daemon -x test || true
         cp build/reports/spotbugs/main.sarif reports/spotbugs.sarif 2>/dev/null || true
 
     - name: Dep-Check (Java)
-      if: ${{ inputs.language == 'java' }}
+      if: ${{ (inputs.tool == '' || inputs.tool == 'depcheck') && inputs.language == 'java' }}
       shell: bash
       env:
         NVD_API_KEY: ${{ env.NVD_API_KEY }}
@@ -132,13 +157,13 @@ runs:
 
     # ----- Python: Bandit + Safety --------------------------------------
     - name: Setup Python 3.12
-      if: ${{ inputs.language == 'python' }}
+      if: ${{ (inputs.tool == '' || inputs.tool == 'bandit' || inputs.tool == 'safety') && inputs.language == 'python' }}
       uses: actions/setup-python@v5
       with:
         python-version: '3.12'
 
     - name: Bandit (Python)
-      if: ${{ inputs.language == 'python' }}
+      if: ${{ (inputs.tool == '' || inputs.tool == 'bandit') && inputs.language == 'python' }}
       shell: bash
       run: |
         pip install 'bandit[toml]' bandit-sarif-formatter
@@ -146,7 +171,7 @@ runs:
           -f sarif -o reports/bandit.sarif || true
 
     - name: Safety (Python)
-      if: ${{ inputs.language == 'python' }}
+      if: ${{ (inputs.tool == '' || inputs.tool == 'safety') && inputs.language == 'python' }}
       shell: bash
       run: |
         # Pin safety<3 because 3.x replaced `check` with `scan` and changed
@@ -165,13 +190,13 @@ runs:
 
     # ----- Node: ESLint security + npm audit ----------------------------
     - name: Setup Node 20
-      if: ${{ inputs.language == 'node' }}
+      if: ${{ (inputs.tool == '' || inputs.tool == 'eslint' || inputs.tool == 'npm-audit') && inputs.language == 'node' }}
       uses: actions/setup-node@v4
       with:
         node-version: '20'
 
     - name: ESLint security (Node)
-      if: ${{ inputs.language == 'node' }}
+      if: ${{ (inputs.tool == '' || inputs.tool == 'eslint') && inputs.language == 'node' }}
       shell: bash
       run: |
         npm install --save-dev eslint eslint-plugin-security @microsoft/eslint-formatter-sarif || true
@@ -183,14 +208,14 @@ runs:
           --output-file reports/eslint.sarif || true
 
     - name: npm audit (Node)
-      if: ${{ inputs.language == 'node' }}
+      if: ${{ (inputs.tool == '' || inputs.tool == 'npm-audit') && inputs.language == 'node' }}
       shell: bash
       run: |
         npm audit --json > reports/npm-audit.json || true
 
     # ----- Go: gosec ----------------------------------------------------
     - name: gosec (Go)
-      if: ${{ inputs.language == 'go' }}
+      if: ${{ (inputs.tool == '' || inputs.tool == 'gosec') && inputs.language == 'go' }}
       uses: securego/gosec@master
       with:
         args: '-fmt=sarif -out=reports/gosec.sarif ./...'
@@ -203,10 +228,11 @@ runs:
         ls -la reports/ || true
         echo "dir=reports" >> "$GITHUB_OUTPUT"
 
-    - name: Upload individual artifacts
+    - name: Upload artifact
       if: ${{ inputs.upload-individual-artifacts == 'true' }}
       uses: actions/upload-artifact@v4
       with:
-        name: sast-reports-${{ github.run_number }}
+        name: ${{ inputs.artifact-name != '' && inputs.artifact-name || format('sast-reports-{0}', github.run_number) }}
         path: reports/
         retention-days: 30
+        if-no-files-found: ignore

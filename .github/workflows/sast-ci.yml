@@ -138,27 +138,102 @@ env:
 # về @v0.2.0 để inheritor có thể pin version-stable.
 
 jobs:
-  sast:
-    name: SAST (${{ inputs.language }})
+  # ============================================================
+  # Setup — build the per-language tool matrix so each SAST/SCA
+  # tool runs in its OWN job (parallel) instead of as sequential
+  # steps in a single job. Wall-clock ≈ slowest tool, not the sum.
+  # ============================================================
+  setup:
+    name: Setup matrix
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 2
+    outputs:
+      tools: ${{ steps.matrix.outputs.tools }}
+    steps:
+      - name: Compute tool matrix from language
+        id: matrix
+        shell: bash
+        run: |
+          case "${{ inputs.language }}" in
+            java)   tools='["semgrep","codeql","trivy-fs","spotbugs","depcheck"]' ;;
+            python) tools='["semgrep","codeql","trivy-fs","bandit","safety"]' ;;
+            node)   tools='["semgrep","codeql","trivy-fs","eslint","npm-audit"]' ;;
+            go)     tools='["semgrep","codeql","trivy-fs","gosec"]' ;;
+            *)      tools='["semgrep","trivy-fs"]' ;;
+          esac
+          echo "tools=$tools" >> "$GITHUB_OUTPUT"
+          echo "language=${{ inputs.language }} → $tools"
+
+  # ============================================================
+  # Scan — one job PER TOOL, run in PARALLEL. fail-fast:false so a
+  # single tool failing doesn't cancel the others. Each job uploads
+  # sast-reports-<run>-<tool>; the merge job stitches them back into
+  # the single sast-reports-<run> bundle the poller + gate expect.
+  # ============================================================
+  scan:
+    name: Scan (${{ matrix.tool }})
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      security-events: write   # CodeQL init needs it
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        tool: ${{ fromJson(needs.setup.outputs.tools) }}
     env:
-      # GitHub forbids `secrets.*` in step-level `if:` and bare `${{ secrets.* }}`
-      # in some contexts, so we bind once at job level then reference env.* below.
-      NVD_API_KEY:     ${{ secrets.nvd_api_key }}
-      DASHBOARD_URL:   ${{ secrets.dashboard_url }}
-      DASHBOARD_TOKEN: ${{ secrets.dashboard_token }}
+      NVD_API_KEY: ${{ secrets.nvd_api_key }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Run SAST suite
-        uses: cochecheee/sast-action/actions/sast-suite@master
+      # TEMP — pinned to the feat branch so the matrix `tool` input exists
+      # while testing. Swap to @master before merging feat/parallel-sast.
+      - name: Run ${{ matrix.tool }}
+        uses: cochecheee/sast-action/actions/sast-suite@feat/parallel-sast
         with:
           language: ${{ inputs.language }}
           semgrep-config: ${{ inputs.semgrep_config }}
-          upload-individual-artifacts: 'true'
+          tool: ${{ matrix.tool }}
+          artifact-name: sast-reports-${{ github.run_number }}-${{ matrix.tool }}
+
+  # ============================================================
+  # Merge — combine every per-tool artifact into the single
+  # sast-reports-<run> bundle, then notify the dashboard once.
+  # `!cancelled()` so partial results still merge even if one tool
+  # job failed (fail-fast:false keeps the others running).
+  # ============================================================
+  merge:
+    name: Merge reports + notify
+    needs: scan
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      DASHBOARD_URL:   ${{ secrets.dashboard_url }}
+      DASHBOARD_TOKEN: ${{ secrets.dashboard_token }}
+    steps:
+      - name: Download per-tool artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sast-reports-${{ github.run_number }}-*
+          path: reports
+          merge-multiple: true
+
+      - name: List merged reports
+        shell: bash
+        run: ls -la reports/ 2>/dev/null || echo "(no reports produced)"
+
+      - name: Upload combined sast-reports artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sast-reports-${{ github.run_number }}
+          path: reports/
+          retention-days: 30
+          if-no-files-found: warn
 
       - name: Notify chat-system dashboard
         if: env.DASHBOARD_URL != ''
@@ -177,7 +252,7 @@ jobs:
   # ============================================================
   gate:
     name: Security Gate
-    needs: sast
+    needs: merge
     if: ${{ inputs.gate_enabled }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -203,15 +278,15 @@ jobs:
   # CD — Build image + deploy Render staging (V2.2)
   # Runs only when caller sets `with: deploy: true`. Requires
   # docker_username / docker_password / render_deploy_hook secrets.
-  # `needs: [sast, gate]` — chỉ deploy khi SAST xong + gate pass.
+  # `needs: [merge, gate]` — chỉ deploy khi scan+merge xong + gate pass.
   # Khi gate_enabled=false, gate job skipped → vẫn deploy (back-compat).
   # ============================================================
   cd:
     name: CD (build + deploy)
-    needs: [sast, gate]
+    needs: [merge, gate]
     # Cho phép chạy khi gate skipped (gate_enabled=false) hoặc gate success.
-    # Không dùng always() vì muốn block khi gate fail hoặc sast fail.
-    if: ${{ inputs.deploy && needs.sast.result == 'success' && (needs.gate.result == 'success' || needs.gate.result == 'skipped') }}
+    # Không dùng always() vì muốn block khi gate fail hoặc scan/merge fail.
+    if: ${{ inputs.deploy && needs.merge.result == 'success' && (needs.gate.result == 'success' || needs.gate.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -259,12 +334,12 @@ jobs:
   # ============================================================
   dast:
     name: DAST (ZAP ${{ inputs.dast_scan_type }})
-    needs: [sast, gate, cd]
+    needs: [merge, gate, cd]
     if: >-
       ${{ !cancelled()
         && inputs.dast
         && inputs.staging_url != ''
-        && needs.sast.result == 'success'
+        && needs.merge.result == 'success'
         && (needs.cd.result == 'success' || (!inputs.deploy && needs.cd.result == 'skipped')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30

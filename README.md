@@ -39,8 +39,9 @@ Pin to `@v0.2.0` once tagged (until then use `@master`).
 | `node`   | Semgrep, CodeQL, Trivy-FS | ESLint-security, npm-audit |
 | `go`     | Semgrep, CodeQL, Trivy-FS | gosec |
 
-All tools run **sequentially as steps inside one `sast` job** (not parallel jobs).
-See "Pipeline stages" below.
+Each tool runs in its **own parallel job** (a language-aware `strategy: matrix`);
+a `merge` job stitches the per-tool reports back into one `sast-reports-<run>`
+bundle. See "Pipeline stages" below.
 
 ## Per-project DAST + deploy
 
@@ -99,20 +100,22 @@ chat-system poller ingests `dast-reports-*` into findings. Full design notes:
 
 ## Pipeline stages
 
-The reusable workflow wires four jobs, run **strictly in sequence** (each `needs`
-the one before). Nothing runs in parallel:
+The reusable workflow wires these jobs. The `scan` tools run **in parallel**
+(one job per tool); everything else is sequential (each `needs` the one before):
 
 ```
-sast ──▶ gate ──▶ cd ──▶ dast
-(scan)   (block)  (deploy) (ZAP)
+setup ─▶ scan ×N (parallel) ─▶ merge ─▶ gate ─▶ cd ─▶ dast
+(matrix)  (one job / tool)     (stitch) (block) (deploy) (ZAP)
 ```
 
 | Job | Runs when | What it does |
 |---|---|---|
-| `sast` | always | Runs the language toolset (steps, sequential), uploads `sast-reports-<run>`, notifies dashboard |
-| `gate` | `gate_enabled: true` (default) | Downloads the artifact, counts critical/high, fails if over threshold → blocks `cd`/`dast` |
-| `cd`   | `deploy: true` + gate pass/skip | Builds & pushes Docker image, triggers Render deploy |
-| `dast` | `dast: true` + `staging_url` set | OWASP ZAP baseline/full scan against staging |
+| `setup` | always | Computes the per-language tool matrix (e.g. python → semgrep, codeql, trivy-fs, bandit, safety) |
+| `scan`  | always | **One parallel job per tool** (`fail-fast:false`); each uploads `sast-reports-<run>-<tool>` |
+| `merge` | always (`!cancelled()`) | Merges the per-tool artifacts into `sast-reports-<run>`, notifies dashboard |
+| `gate`  | `gate_enabled: true` (default) | Downloads the merged artifact, counts critical/high, fails if over threshold → blocks `cd`/`dast` |
+| `cd`    | `deploy: true` + gate pass/skip | Builds & pushes Docker image, triggers Render deploy |
+| `dast`  | `dast: true` + `staging_url` set | OWASP ZAP baseline/full scan against staging |
 
 ## Layout
 
