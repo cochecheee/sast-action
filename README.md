@@ -17,25 +17,30 @@ on:
 
 jobs:
   security:
-    uses: cochecheee/sast-action/.github/workflows/sast-ci.yml@main
+    uses: cochecheee/sast-action/.github/workflows/sast-ci.yml@master
     with:
       language: python    # java | python | node | go
-      dashboard_url: ${{ secrets.MCP_GATEWAY_URL }}
     secrets:
+      # dashboard_url is declared as a SECRET (GitHub forbids secret refs in a
+      # caller `with:` block), so it must go here — not under `with:`.
+      dashboard_url:   ${{ secrets.MCP_GATEWAY_URL }}
       dashboard_token: ${{ secrets.MCP_WEBHOOK_TOKEN }}
-      nvd_api_key: ${{ secrets.NVD_API_KEY }}   # Java only
+      nvd_api_key:     ${{ secrets.NVD_API_KEY }}   # Java only
 ```
 
-Pin to `@v0.2.0` once tagged.
+Pin to `@v0.2.0` once tagged (until then use `@master`).
 
 ## Tools per language
 
 | Language | Universal | Language-specific |
 |---|---|---|
-| `java`   | Semgrep, Trivy-FS | SpotBugs, OWASP Dep-Check |
-| `python` | Semgrep, Trivy-FS | Bandit, Safety |
-| `node`   | Semgrep, Trivy-FS | ESLint-security, npm-audit |
-| `go`     | Semgrep, Trivy-FS | gosec |
+| `java`   | Semgrep, CodeQL, Trivy-FS | SpotBugs, OWASP Dep-Check |
+| `python` | Semgrep, CodeQL, Trivy-FS | Bandit, Safety |
+| `node`   | Semgrep, CodeQL, Trivy-FS | ESLint-security, npm-audit |
+| `go`     | Semgrep, CodeQL, Trivy-FS | gosec |
+
+All tools run **sequentially as steps inside one `sast` job** (not parallel jobs).
+See "Pipeline stages" below.
 
 ## Per-project DAST + deploy
 
@@ -92,26 +97,45 @@ DAST output is uploaded as artifact `dast-reports-<run>` (ZAP JSON/MD/HTML); the
 chat-system poller ingests `dast-reports-*` into findings. Full design notes:
 `docs/research-per-project-dast-deploy.md`.
 
+## Pipeline stages
+
+The reusable workflow wires four jobs, run **strictly in sequence** (each `needs`
+the one before). Nothing runs in parallel:
+
+```
+sast ──▶ gate ──▶ cd ──▶ dast
+(scan)   (block)  (deploy) (ZAP)
+```
+
+| Job | Runs when | What it does |
+|---|---|---|
+| `sast` | always | Runs the language toolset (steps, sequential), uploads `sast-reports-<run>`, notifies dashboard |
+| `gate` | `gate_enabled: true` (default) | Downloads the artifact, counts critical/high, fails if over threshold → blocks `cd`/`dast` |
+| `cd`   | `deploy: true` + gate pass/skip | Builds & pushes Docker image, triggers Render deploy |
+| `dast` | `dast: true` + `staging_url` set | OWASP ZAP baseline/full scan against staging |
+
 ## Layout
 
 ```
 sast-action/
-├── action.yml                              # legacy notify-only single-action (v0.1.0)
 ├── actions/
-│   ├── notify-dashboard/action.yml         # composite — POST webhook
-│   ├── sast-suite/action.yml               # composite — run language tools
-│   └── aggregate-sarif/action.yml          # composite — merge SARIF
+│   ├── sast-suite/action.yml               # composite — run language SAST/SCA tools
+│   ├── security-gate/action.yml            # composite — count crit/high, fail over threshold
+│   ├── notify-dashboard/action.yml         # composite — POST /webhook/pipeline-complete
+│   ├── build-image/action.yml              # composite — Docker build + Trivy image scan + push
+│   ├── deploy-staging/action.yml           # composite — trigger Render deploy hook
+│   └── run-dast/action.yml                 # composite — OWASP ZAP baseline/full scan
 └── .github/workflows/
-    └── sast-ci.yml                         # reusable workflow — wires the three composites
+    └── sast-ci.yml                         # reusable workflow — wires the composites into 4 jobs
 ```
 
 You can also call individual composites directly:
 
 ```yaml
-- uses: cochecheee/sast-action/actions/sast-suite@main
+- uses: cochecheee/sast-action/actions/sast-suite@master
   with:
     language: python
-- uses: cochecheee/sast-action/actions/notify-dashboard@main
+- uses: cochecheee/sast-action/actions/notify-dashboard@master
   with:
     dashboard-url: ${{ secrets.MCP_GATEWAY_URL }}
     dashboard-token: ${{ secrets.MCP_WEBHOOK_TOKEN }}
@@ -121,9 +145,8 @@ You can also call individual composites directly:
 
 | Tag | Status |
 |---|---|
-| `@main`   | Active dev |
+| `@master` | Active dev (current) |
 | `@v0.2.0` | Pending — tag after V2 verification on chat-system |
-| `@v0.1.0` | Legacy single-action notify (root `action.yml`) |
 
 ## Webhook contract
 

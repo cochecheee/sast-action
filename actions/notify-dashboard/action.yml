@@ -4,10 +4,10 @@ description: >-
   gateway downtime by default so it never blocks CI. The poller fallback
   picks up missed runs within 5 minutes.
 
-  This is the V2 split-out of the original repo-root action.yml. Use this
-  one in your CI workflow if you only need the webhook notify; for the
-  full SAST suite use cochecheee/sast-action/.github/workflows/sast-ci.yml
-  reusable workflow which calls all three composite actions internally.
+  Use this composite in your CI workflow if you only need the webhook
+  notify; for the full pipeline use the reusable workflow
+  cochecheee/sast-action/.github/workflows/sast-ci.yml which wires all
+  composite actions internally.
 author: 'cocheche'
 branding:
   icon: 'send'

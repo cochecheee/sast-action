@@ -34,11 +34,9 @@ kết quả về chat-system.
 | `actions/sast-suite` | composite | Chạy tool SAST/SCA theo `language`, upload artifact `sast-reports-<run>` |
 | `actions/security-gate` | composite | Đếm critical/high từ report, fail nếu vượt ngưỡng; hỏi MCP `/findings/gate-count` |
 | `actions/notify-dashboard` | composite | POST metadata run về `/webhook/pipeline-complete` |
-| `actions/aggregate-sarif` | composite | POST từng report về `/artifacts/process` (đường push thay cho poller) |
 | `actions/build-image` | composite | Docker build + push |
 | `actions/deploy-staging` | composite | Trigger Render deploy hook |
 | `actions/run-dast` | composite | OWASP ZAP baseline/full scan |
-| `action.yml` (root) | action lẻ | Legacy v0.1.0 — chỉ notify |
 
 ### Tool theo ngôn ngữ
 
@@ -113,12 +111,10 @@ flowchart TD
 |---|---|---|---|---|
 | 1 | CI → MCP | notify-dashboard | `POST /webhook/pipeline-complete` | `{run_id, run_number, repository, ref, sha, actor, event, pipeline_status, timestamp}` + `Authorization: Bearer <token>` |
 | 2 | MCP → CI | (poller MCP) | GitHub Actions API | kéo artifact `sast-reports-<run>` để parse |
-| 2' | CI → MCP | aggregate-sarif (tùy chọn) | `POST /artifacts/process` | `{project_id, artifact_name, content}` + `X-API-Key` |
 | 3 | CI → MCP | security-gate | `GET /findings/gate-count?project_id=&run_id=` | trả `{critical, high}` (loại REVOKED) |
 
-Có **2 đường đưa SARIF vào MCP**: (a) poller MCP tự kéo artifact (mặc định, chỉ
-cần webhook #1), hoặc (b) CI chủ động push từng file qua #2' (cho repo private/
-artifact bị tắt). Khuyến nghị: dùng poller.
+SARIF vào MCP qua **poller**: MCP tự kéo artifact `sast-reports-<run>` sau khi nhận
+webhook #1 (chỉ cần một đường, không cần CI push từng file).
 
 ---
 
@@ -181,9 +177,9 @@ Finding(id, project_id, run_id, rule_id, severity, status, ...)
 ### 5.5 Auth nhất quán
 - notify-dashboard gửi `Authorization: Bearer <dashboard_token>` → MCP so với
   `CI_WEBHOOK_TOKEN`.
-- aggregate-sarif gửi `X-API-Key` → MCP so với `CI_API_KEY`.
-- gate-count hiện **không gắn token** → nên cho phép GET không auth hoặc thêm
-  header tương ứng ở cả 2 phía.
+- security-gate gửi `Authorization: Bearer <mcp_token>` cho gate-count → MCP so
+  với `CI_WEBHOOK_TOKEN` (khi `ANONYMOUS_READ_ENABLED=false`). Thiếu token →
+  gate-count 401 → gate fallback về raw SARIF (bỏ qua REVOKED).
 
 ### 5.6 Wiring `project_id` từ CI
 - Để bật learning loop, caller ALOUTE phải set `mcp_project_id: <Project.id>`

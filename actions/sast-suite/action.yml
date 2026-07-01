@@ -24,7 +24,7 @@ inputs:
 
 outputs:
   reports-dir:
-    description: 'Directory containing all SARIF/JSON outputs. Pass to aggregate-sarif.'
+    description: 'Directory containing all SARIF/JSON outputs (default: reports/).'
     value: ${{ steps.collect.outputs.dir }}
 
 runs:
