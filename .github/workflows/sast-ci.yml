@@ -190,10 +190,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      # TEMP — pinned to the feat branch so the matrix `tool` input exists
-      # while testing. Swap to @master before merging feat/parallel-sast.
       - name: Run ${{ matrix.tool }}
-        uses: cochecheee/sast-action/actions/sast-suite@feat/parallel-sast
+        uses: cochecheee/sast-action/actions/sast-suite@master
         with:
           language: ${{ inputs.language }}
           semgrep-config: ${{ inputs.semgrep_config }}
