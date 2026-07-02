@@ -174,7 +174,7 @@ jobs:
     name: Scan (${{ matrix.tool }})
     needs: setup
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
     permissions:
       contents: read
       security-events: write   # CodeQL init needs it

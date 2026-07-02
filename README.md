@@ -121,8 +121,10 @@ setup ─▶ scan ×N (parallel) ─▶ merge ─▶ gate ─▶ cd ─▶ dast
 
 ```
 sast-action/
+├── action.yml                              # root composite — notify-only single-action (v0.1.0)
 ├── actions/
 │   ├── sast-suite/action.yml               # composite — run language SAST/SCA tools
+│   ├── aggregate-sarif/action.yml          # composite — push each report to /artifacts/process (optional)
 │   ├── security-gate/action.yml            # composite — count crit/high, fail over threshold
 │   ├── notify-dashboard/action.yml         # composite — POST /webhook/pipeline-complete
 │   ├── build-image/action.yml              # composite — Docker build + Trivy image scan + push

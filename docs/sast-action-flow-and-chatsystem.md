@@ -34,9 +34,11 @@ kết quả về chat-system.
 | `actions/sast-suite` | composite | Chạy tool SAST/SCA theo `language`, upload artifact `sast-reports-<run>` |
 | `actions/security-gate` | composite | Đếm critical/high từ report, fail nếu vượt ngưỡng; hỏi MCP `/findings/gate-count` |
 | `actions/notify-dashboard` | composite | POST metadata run về `/webhook/pipeline-complete` |
+| `actions/aggregate-sarif` | composite | POST từng report về `/artifacts/process` (đường push thay cho poller) |
 | `actions/build-image` | composite | Docker build + push |
 | `actions/deploy-staging` | composite | Trigger Render deploy hook |
 | `actions/run-dast` | composite | OWASP ZAP baseline/full scan |
+| `action.yml` (root) | action lẻ | Legacy v0.1.0 — chỉ notify |
 
 ### Tool theo ngôn ngữ
 
