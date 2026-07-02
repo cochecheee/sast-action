@@ -138,8 +138,14 @@ runs:
       if: ${{ (inputs.tool == '' || inputs.tool == 'spotbugs') && inputs.language == 'java' }}
       shell: bash
       run: |
+        # Repos committed from Windows often lose the +x bit on gradlew
+        # (mode 100644) → "./gradlew: Permission denied" and, because of the
+        # `|| true` guard, the tool silently produces NO report — which once
+        # let a Log4Shell app PASS the gate. chmod defensively.
+        chmod +x ./gradlew 2>/dev/null || true
         ./gradlew compileJava spotbugsMain --no-daemon -x test || true
         cp build/reports/spotbugs/main.sarif reports/spotbugs.sarif 2>/dev/null || true
+        [ -f reports/spotbugs.sarif ] || echo "::warning::SpotBugs produced no SARIF — gate will not see its findings"
 
     - name: Dep-Check (Java)
       if: ${{ (inputs.tool == '' || inputs.tool == 'depcheck') && inputs.language == 'java' }}
@@ -147,6 +153,7 @@ runs:
       env:
         NVD_API_KEY: ${{ env.NVD_API_KEY }}
       run: |
+        chmod +x ./gradlew 2>/dev/null || true
         ./gradlew dependencyCheckAnalyze --no-daemon \
           -Dnvd.api.key="${NVD_API_KEY:-}" \
           -Dnvd.api.validForHours=720 \
@@ -154,6 +161,7 @@ runs:
           -DossindexAnalyzerEnabled=false \
           -DnodeAuditAnalyzerEnabled=false || true
         cp build/reports/dependency-check-report.json reports/depcheck.json 2>/dev/null || true
+        [ -f reports/depcheck.json ] || echo "::warning::Dep-Check produced no report — CVE findings (e.g. Log4Shell) will NOT reach the gate"
 
     # ----- Python: Bandit + Safety --------------------------------------
     - name: Setup Python 3.12
