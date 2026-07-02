@@ -49,6 +49,60 @@ outputs:
 runs:
   using: 'composite'
   steps:
+    # ================================================================
+    # Cache — ba lớp (báo cáo §4.2.1). Rút thời gian pipeline từ ~15p
+    # (cold) xuống 3-5p (warm). Restore chạy trước mọi tool step; save
+    # tự động ở post-job. Mỗi lớp chỉ bật cho job/tool liên quan (matrix
+    # mode chạy 1 tool/job) để không kéo path thừa.
+    # ================================================================
+    # ----- Lớp 1/3: dependencies (key = hash lock-file) -----------------
+    - name: Cache — dependencies (layer 1/3)
+      if: ${{ inputs.tool == '' || inputs.tool == 'spotbugs' || inputs.tool == 'depcheck' || inputs.tool == 'bandit' || inputs.tool == 'safety' || inputs.tool == 'eslint' || inputs.tool == 'npm-audit' }}
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.m2/repository
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+          ~/.cache/pip
+          ~/.npm
+        key: sast-deps-${{ inputs.language }}-${{ hashFiles('**/pom.xml', '**/build.gradle*', '**/requirements*.txt', '**/package-lock.json') }}
+        restore-keys: |
+          sast-deps-${{ inputs.language }}-
+
+    # ----- Lớp 2/3: build artifacts (key = hash mã nguồn) --------------
+    - name: Cache — build artifacts (layer 2/3)
+      if: ${{ (inputs.tool == '' || inputs.tool == 'spotbugs' || inputs.tool == 'depcheck' || inputs.tool == 'codeql') && inputs.language == 'java' }}
+      uses: actions/cache@v4
+      with:
+        path: |
+          build
+          target
+          .gradle
+        key: sast-build-${{ inputs.language }}-${{ hashFiles('**/*.java', '**/*.kt', '**/*.gradle*', '**/pom.xml') }}
+        restore-keys: |
+          sast-build-${{ inputs.language }}-
+
+    # ----- Lớp 3/3: SAST tool DB (quan trọng nhất) ---------------------
+    #   CodeQL database + Semgrep rule index (báo cáo §4.2.1); kèm Trivy
+    #   vuln DB + Dep-Check NVD data — các tải chậm, gần như tĩnh, chiếm
+    #   phần lớn thời gian cold-cache. Rolling cache: key theo run_id (luôn
+    #   lưu bản mới) + restore-keys prefix (luôn khôi phục bản gần nhất).
+    - name: Cache — SAST tool DB (layer 3/3)
+      if: ${{ inputs.tool == '' || inputs.tool == 'semgrep' || inputs.tool == 'codeql' || inputs.tool == 'trivy-fs' || inputs.tool == 'depcheck' }}
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.semgrep
+          ~/.cache/semgrep
+          ~/.codeql
+          ~/.cache/trivy
+          ~/.gradle/dependency-check-data
+        key: sast-db-${{ inputs.tool || 'all' }}-${{ github.run_id }}
+        restore-keys: |
+          sast-db-${{ inputs.tool || 'all' }}-
+          sast-db-
+
     # ----- Universal: Semgrep (all languages) ---------------------------
     - name: Semgrep
       if: ${{ inputs.tool == '' || inputs.tool == 'semgrep' }}
